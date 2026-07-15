@@ -9,7 +9,7 @@ const cndPart1 = 'https://cdn.';
 const cndPart2 = 'jsdelivr.net/';
 const cndPart3 = 'npm/libcurl.js';
 const cndPart4 = '@latest/';
-const cndPart5 = 'libcurl_full.js/';
+const cndPart5 = 'libcurl_full.js';
 
 // 
 const libcurlUrl = cndPart1 + cndPart2 + cndPart3 + cndPart4 + cndPart5;
