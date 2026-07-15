@@ -12,3 +12,5 @@ now.gg (partial)
 Google (not yet, working on it)
 
 I dont recommend this as your primary proxy, until this gets better use uv or scramjet, but if you want to add this, go ahead
+
+Due to it being so small (~600 lines of code total) it is absurdly fast at rewritting  websites
