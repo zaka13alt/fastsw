@@ -10,3 +10,5 @@ Discord (partical, loging in works so does fine, but Discord might lock you acco
 now.gg (partial)
 
 Google (not yet, working on it)
+
+I dont recommend this as your primary proxy, until this gets better use uv or scramjet, but if you want to add this, go ahead
