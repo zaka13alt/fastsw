@@ -2,7 +2,7 @@
 // 
 // ==========================================
 const PROXY_PREFIX = '/go/';
-const WISP_SERVER_URL = 'wss://wisp.mercurywork.shop'; // 
+const WISP_SERVER_URL = 'wss://wisp.mercurywork.shop/wisp/'; // 
 
 // 
 const cndPart1 = 'https://cdn.';
@@ -91,7 +91,7 @@ const REWRITER_SOURCE = `(function() {
     const nativeFetch = window.fetch;
     window.fetch = async function(input, init) {
         if (typeof input === 'string') input = rewriteUrl(input);
-        else if (input instanceof Request) input = new Request(rewriteUrl(input.url), input);
+        else if (input instanceof Request) input = new Request(rewriteUrl(url), input);
         return nativeFetch.call(this, input, init);
     };
 
@@ -100,13 +100,19 @@ const REWRITER_SOURCE = `(function() {
         return nativeXHROpen.call(this, method, rewriteUrl(url), ...args);
     };
 
+    // --- INTERCEPT WEBSOCKET NETWORKING (CHROME SCHEME FIX) ---
     const NativeWebSocket = window.WebSocket;
     window.WebSocket = function(url, protocols) {
         try {
             const baseContext = simulatedTarget ? simulatedTarget.href : window.location.href;
             const targetUrl = new URL(url, baseContext);
-            const protocolScheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const interceptWsRoute = \`\${protocolScheme}//\${PROXY_HOST}/ws/?target=\${encodeURIComponent(targetUrl.href)}\`;
+            
+            // Explicitly force the target browser protocol using a clean wss/ws structure 
+            const wsScheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            
+            // Build a valid WebSocket endpoint structure that points right back to your server's proxy route
+            const interceptWsRoute = \`\${wsScheme}//\${PROXY_HOST}/ws/?target=\${encodeURIComponent(targetUrl.href)}\`;
+            
             return new NativeWebSocket(interceptWsRoute, protocols);
         } catch(e) {
             return new NativeWebSocket(url, protocols);
@@ -120,6 +126,7 @@ const REWRITER_SOURCE = `(function() {
         return nativePushState.call(this, state, title, url);
     };
 `;
+
 // ==========================================
 // 
 // ==========================================
