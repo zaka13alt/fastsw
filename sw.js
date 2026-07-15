@@ -1,5 +1,5 @@
 // ==========================================
-// PART 1: SETUP ENVIRONMENT & CONFIGURATION
+// config
 // ==========================================
 const PROXY_PREFIX = '/go/';
 const WISP_SERVER_URL = 'wss://wisp.mercurywork.shop/wisp/'; // 
@@ -8,8 +8,8 @@ const WISP_SERVER_URL = 'wss://wisp.mercurywork.shop/wisp/'; //
 const cndPart1 = 'https://cdn.';
 const cndPart2 = 'jsdelivr.net/';
 const cndPart3 = 'npm/libcurl.js';
-const cndPart4 = '@latest/dist/';
-const cndPart5 = 'libcurl.js';
+const cndPart4 = '@latest/';
+const cndPart5 = 'libcurl_full.js/';
 
 // 
 const libcurlUrl = cndPart1 + cndPart2 + cndPart3 + cndPart4 + cndPart5;
