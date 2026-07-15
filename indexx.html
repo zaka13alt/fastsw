@@ -28,7 +28,7 @@
 
         // Register client service worker under full site root scope
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('/sw.js', { scope: '/' })
+            navigator.serviceWorker.register('/fixed_sw.js', { scope: '/' })
             .then(reg => {
                 console.log('Proxy scope locked to:', reg.scope);
                 
