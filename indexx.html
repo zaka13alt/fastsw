@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IXL Learning</title>
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #141414; color: #fff; font-family: system-ui, sans-serif; }
+        #control-bar { height: 60px; display: flex; align-items: center; padding: 0 20px; background: #1f1f1f; gap: 15px; border-bottom: 1px solid #333; }
+        input { flex: 1; padding: 12px; border: 1px solid #444; border-radius: 6px; background: #2b2b2b; color: #fff; font-size: 14px; }
+        button { padding: 12px 24px; background: #0070f3; border: none; border-radius: 6px; color: #fff; cursor: pointer; font-weight: 600; font-size: 14px; }
+        button:hover { background: #0051cb; }
+        iframe { width: 100%; height: calc(100% - 61px); border: none; background: #fff; }
+    </style>
+</head>
+<body>
+
+    <div id="control-bar">
+        <input type="text" id="target-url" placeholder="Enter target site URL (e.g., https://example.com)...">
+        <button id="launch-btn">Navigate</button>
+    </div>
+
+    <iframe id="display-frame" src="about:blank"></iframe>
+
+    <script>
+        // Global controller readiness tracking variable
+        let isProxyReady = false;
+
+        // Register client service worker under full site root scope
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js', { scope: '/' })
+            .then(reg => {
+                console.log('Proxy scope locked to:', reg.scope);
+                
+                // CRITICAL FIX: Ensure the Service Worker is fully activated and controlling the page.
+                // If it is just installing or waiting, wait for it to take immediate control.
+                if (navigator.serviceWorker.controller) {
+                    isProxyReady = true;
+                } else {
+                    navigator.serviceWorker.ready.then(() => {
+                        // Force active control assignment
+                        return navigator.serviceWorker.getRegistration();
+                    }).then(() => {
+                        isProxyReady = true;
+                    });
+                }
+            })
+            .catch(err => console.error('Service worker installation stalled:', err));
+
+            // Monitor state changes to catch immediate claims
+            navigator.serviceWorker.addEventListener('controllerchange', () => {
+                isProxyReady = true;
+            });
+        }
+
+        function handleNavigation() {
+            let inputUrl = document.getElementById('target-url').value.trim();
+            if (!inputUrl) return;
+
+            // Automatically prepend secure protocol context if absent
+            if (!inputUrl.startsWith('http://') && !inputUrl.startsWith('https://')) {
+                inputUrl = 'https://' + inputUrl;
+            }
+
+            if (!isProxyReady) {
+                alert("Still loading, wait a second");
+                return;
+            }
+
+            // Route execution loop directly through local proxy namespace
+            // CRITICAL FIX: Safe nested normalization structure prevents broken sub-query processing
+            document.getElementById('display-frame').src = `/go/${encodeURIComponent(inputUrl)}`;
+        }
+
+        // Click handler pipeline assignment
+        document.getElementById('launch-btn').addEventListener('click', handleNavigation);
+
+        // COGNITIVE FIX: Allow keyboard navigation confirmation out of the input element directly
+        document.getElementById('target-url').addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                handleNavigation();
+            }
+        });
+    </script>
+</body>
+</html>
