@@ -1,5 +1,5 @@
 // ==========================================
-// Enhanced Browser API Patcher & Form Handler
+// Enhanced Service Worker with CSP Handling
 // ==========================================
 const PROXY_PREFIX = '/go/';
 const WISP_SERVER_URL = 'wss://wisp.mercurywork.shop/wisp/'; 
@@ -39,27 +39,117 @@ if (typeof libcurl !== 'undefined') {
 }
 
 // ==========================================
-// ENHANCED REWRITER - Comprehensive API Patching
+// Cookie Isolation Utilities
+// ==========================================
+class CookieManager {
+    constructor() {
+        this.cookieStore = new Map();
+    }
+
+    getDomainKey(url) {
+        try {
+            const urlObj = new URL(url);
+            return urlObj.hostname;
+        } catch (e) {
+            return 'default';
+        }
+    }
+
+    parseCookieString(cookieStr) {
+        const cookies = [];
+        if (!cookieStr) return cookies;
+        
+        cookieStr.split(';').forEach(cookie => {
+            const trimmed = cookie.trim();
+            if (trimmed) {
+                const [name, ...valueParts] = trimmed.split('=');
+                const value = valueParts.join('=');
+                cookies.push({ name: name.trim(), value: value });
+            }
+        });
+        return cookies;
+    }
+
+    setCookies(url, cookieString) {
+        const domain = this.getDomainKey(url);
+        if (!this.cookieStore.has(domain)) {
+            this.cookieStore.set(domain, new Map());
+        }
+        
+        const domainCookies = this.cookieStore.get(domain);
+        const parsedCookies = this.parseCookieString(cookieString);
+        
+        parsedCookies.forEach(cookie => {
+            if (cookie.name) {
+                domainCookies.set(cookie.name, cookie.value);
+            }
+        });
+    }
+
+    getCookies(url, cookieNames = null) {
+        const domain = this.getDomainKey(url);
+        if (!this.cookieStore.has(domain)) return '';
+        
+        const domainCookies = this.cookieStore.get(domain);
+        const cookiePairs = [];
+        
+        if (cookieNames) {
+            const names = Array.isArray(cookieNames) ? cookieNames : [cookieNames];
+            names.forEach(name => {
+                if (domainCookies.has(name)) {
+                    cookiePairs.push(`${name}=${domainCookies.get(name)}`);
+                }
+            });
+        } else {
+            for (let [name, value] of domainCookies) {
+                cookiePairs.push(`${name}=${value}`);
+            }
+        }
+        
+        return cookiePairs.join('; ');
+    }
+
+    clearCookies(url) {
+        const domain = this.getDomainKey(url);
+        this.cookieStore.delete(domain);
+    }
+
+    clearAllCookies() {
+        this.cookieStore.clear();
+    }
+}
+
+const cookieManager = new CookieManager();
+
+// ==========================================
+// ENHANCED REWRITER - CSP Compliant
 // ==========================================
 const REWRITER_SOURCE = `(function() {
     const PROXY_PREFIX = '/go/';
     const PROXY_HOST = window.location.host;
     const PROXY_ORIGIN = window.location.origin;
 
-    // Configuration for API detection
-    const API_PATTERNS = [
-        '/api/', '/v1/', '/v2/', '/v3/', '/v4/', '/v5/',
-        '/graphql', '/rest/', '/rpc/', '/service/', '/auth/',
-        '/oauth/', '/token', '/login', '/signin', '/register',
-        '/upload', '/post', '/put', '/delete', '/patch'
-    ];
-
-    const simulatedTarget = new URL(unproxyUrl(window.location.href));
+    // Get current proxied domain
+    function getCurrentDomain() {
+        try {
+            const url = unproxyUrl(window.location.href);
+            return new URL(url).hostname;
+        } catch (e) {
+            return 'default';
+        }
+    }
 
     function isApiRequest(url) {
         if (!url || typeof url !== 'string') return false;
         const urlLower = url.toLowerCase();
-        return API_PATTERNS.some(pattern => urlLower.includes(pattern));
+        const apiPatterns = [
+            '/api/', '/v1/', '/v2/', '/v3/', '/v4/', '/v5/',
+            '/graphql', '/rest/', '/rpc/', '/service/', '/auth/',
+            '/oauth/', '/token', '/login', '/signin', '/register',
+            '/upload', '/post', '/put', '/delete', '/patch',
+            '/ajax', '/json', '/rpc', '/gateway'
+        ];
+        return apiPatterns.some(pattern => urlLower.includes(pattern));
     }
 
     function rewriteUrl(url) {
@@ -68,16 +158,10 @@ const REWRITER_SOURCE = `(function() {
         if (trimmed.startsWith('data:') || trimmed.startsWith('blob:') || trimmed.startsWith('javascript:')) return url;
         if (trimmed.startsWith(PROXY_PREFIX) || trimmed.startsWith(PROXY_ORIGIN + PROXY_PREFIX)) return url;
         try {
-            const baseContext = simulatedTarget ? simulatedTarget.href : window.location.href;
+            const baseContext = window.location.href;
             const resolved = new URL(trimmed, baseContext).href;
             return PROXY_PREFIX + encodeURIComponent(resolved);
         } catch (e) {
-            if (simulatedTarget) {
-                try {
-                    const manualResolved = new URL(trimmed, simulatedTarget.origin).href;
-                    return PROXY_PREFIX + encodeURIComponent(manualResolved);
-                } catch(err) {}
-            }
             return url;
         }
     }
@@ -93,602 +177,853 @@ const REWRITER_SOURCE = `(function() {
         return url;
     }
 
-    // --- PATCH WebAssembly ---
-    const nativeInstantiateStreaming = WebAssembly.instantiateStreaming;
-    WebAssembly.instantiateStreaming = function(source, importObject) {
-        if (source instanceof Response) return nativeInstantiateStreaming.call(WebAssembly, source, importObject);
-        if (typeof source === 'string') source = rewriteUrl(source);
-        else if (source instanceof Request) source = new Request(rewriteUrl(source.url), source);
-        return nativeInstantiateStreaming.call(WebAssembly, source, importObject);
-    };
+    // --- CSP Compliant Script Injection ---
+    function injectRewriter() {
+        // Check if already injected
+        if (window._rewriterInjected) return;
+        window._rewriterInjected = true;
 
-    // --- PATCH fetch API ---
-    const nativeFetch = window.fetch;
-    window.fetch = async function(input, init) {
-        if (typeof input === 'string') {
-            input = rewriteUrl(input);
-        } else if (input instanceof Request) {
-            const url = input.url;
-            input = new Request(rewriteUrl(url), input);
-        }
-        return nativeFetch.call(this, input, init);
-    };
-
-    // --- PATCH XMLHttpRequest ---
-    const nativeXHROpen = XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open = function(method, url, ...args) {
-        const rewrittenUrl = rewriteUrl(url);
-        // Store original URL for reference
-        this._originalUrl = url;
-        this._rewrittenUrl = rewrittenUrl;
-        return nativeXHROpen.call(this, method, rewrittenUrl, ...args);
-    };
-
-    // --- PATCH XMLHttpRequest send (for form data) ---
-    const nativeXHRSend = XMLHttpRequest.prototype.send;
-    XMLHttpRequest.prototype.send = function(body) {
-        // If we're sending FormData and it's going to an API endpoint
-        if (body instanceof FormData && this._rewrittenUrl) {
-            // Check if we need to modify the form data
-            const url = unproxyUrl(this._rewrittenUrl);
-            if (isApiRequest(url)) {
-                // We can intercept and modify form data here if needed
-                console.log('[sw-helper] Intercepted API form submission:', url);
+        // Try to find any existing nonce in the page
+        let nonce = '';
+        const scripts = document.querySelectorAll('script');
+        for (const script of scripts) {
+            if (script.nonce) {
+                nonce = script.nonce;
+                break;
             }
         }
-        return nativeXHRSend.call(this, body);
-    };
 
-    // --- PATCH WebSocket ---
-    const NativeWebSocket = window.WebSocket;
-    window.WebSocket = function(url, protocols) {
-        try {
-            const baseContext = simulatedTarget ? simulatedTarget.href : window.location.href;
-            const targetUrl = new URL(url, baseContext);
-            
-            const wsScheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const interceptWsRoute = \`\${wsScheme}//\${PROXY_HOST}/ws/?target=\${encodeURIComponent(targetUrl.href)}\`;
-            
-            return new NativeWebSocket(interceptWsRoute, protocols);
-        } catch(e) {
-            return new NativeWebSocket(url, protocols);
+        // Create a new script element with proper attributes
+        const script = document.createElement('script');
+        if (nonce) {
+            script.setAttribute('nonce', nonce);
         }
-    };
-    window.WebSocket.prototype = NativeWebSocket.prototype;
+        script.setAttribute('data-rewriter', 'true');
+        
+        // Use inline script with the full rewriter code
+        // This avoids CSP issues with external scripts
+        script.textContent = \`
+            // Rewriter core functions
+            const PROXY_PREFIX = '/go/';
+            const PROXY_HOST = window.location.host;
+            const PROXY_ORIGIN = window.location.origin;
 
-    // --- PATCH History API ---
-    const nativePushState = window.history.pushState;
-    window.history.pushState = function(state, title, url) {
-        if (url) url = rewriteUrl(url.toString());
-        return nativePushState.call(this, state, title, url);
-    };
-
-    const nativeReplaceState = window.history.replaceState;
-    window.history.replaceState = function(state, title, url) {
-        if (url) url = rewriteUrl(url.toString());
-        return nativeReplaceState.call(this, state, title, url);
-    };
-
-    // --- PATCH EventSource (Server-Sent Events) ---
-    const NativeEventSource = window.EventSource;
-    window.EventSource = function(url, eventSourceInitDict) {
-        const rewrittenUrl = rewriteUrl(url);
-        return new NativeEventSource(rewrittenUrl, eventSourceInitDict);
-    };
-    window.EventSource.prototype = NativeEventSource.prototype;
-
-    // --- PATCH WebRTC (RTCPeerConnection) ---
-    const NativeRTCPeerConnection = window.RTCPeerConnection;
-    window.RTCPeerConnection = function(configuration) {
-        // Intercept ICE servers and proxy them if needed
-        if (configuration && configuration.iceServers) {
-            configuration.iceServers = configuration.iceServers.map(server => {
-                if (server.urls) {
-                    if (typeof server.urls === 'string') {
-                        server.urls = rewriteUrl(server.urls);
-                    } else if (Array.isArray(server.urls)) {
-                        server.urls = server.urls.map(url => rewriteUrl(url));
-                    }
+            function rewriteUrl(url) {
+                if (!url || typeof url !== 'string') return url;
+                const trimmed = url.trim();
+                if (trimmed.startsWith('data:') || trimmed.startsWith('blob:') || trimmed.startsWith('javascript:')) return url;
+                if (trimmed.startsWith(PROXY_PREFIX) || trimmed.startsWith(PROXY_ORIGIN + PROXY_PREFIX)) return url;
+                try {
+                    const baseContext = window.location.href;
+                    const resolved = new URL(trimmed, baseContext).href;
+                    return PROXY_PREFIX + encodeURIComponent(resolved);
+                } catch (e) {
+                    return url;
                 }
-                return server;
-            });
-        }
-        return new NativeRTCPeerConnection(configuration);
-    };
-    window.RTCPeerConnection.prototype = NativeRTCPeerConnection.prototype;
-
-    // --- PATCH Navigator APIs ---
-    const navigatorProperties = ['geolocation', 'mediaDevices', 'serviceWorker', 'share', 'clipboard'];
-    navigatorProperties.forEach(prop => {
-        if (navigator[prop]) {
-            const original = navigator[prop];
-            navigator[prop] = new Proxy(original, {
-                get(target, prop) {
-                    // Intercept methods that might have URLs
-                    if (prop === 'getUserMedia' || prop === 'getDisplayMedia') {
-                        return function(constraints) {
-                            // Could modify constraints here if needed
-                            return target[prop].call(target, constraints);
-                        };
-                    }
-                    return target[prop];
-                }
-            });
-        }
-    });
-
-    // --- PATCH document.cookie (for tracking) ---
-    const cookieDescriptor = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');
-    if (cookieDescriptor) {
-        Object.defineProperty(document, 'cookie', {
-            get: function() {
-                return cookieDescriptor.get.call(this);
-            },
-            set: function(value) {
-                // Could modify cookies here to ensure they work with proxy
-                cookieDescriptor.set.call(this, value);
             }
-        });
-    }
 
-    // --- PATCH localStorage and sessionStorage ---
-    ['localStorage', 'sessionStorage'].forEach(storageType => {
-        const storage = window[storageType];
-        if (storage) {
-            const originalSetItem = storage.setItem;
-            storage.setItem = function(key, value) {
-                // Check if value contains URLs that need rewriting
-                if (typeof value === 'string' && (value.includes('http://') || value.includes('https://'))) {
+            function unproxyUrl(url) {
+                if (!url || typeof url !== 'string') return url;
+                if (url.includes(PROXY_PREFIX)) {
                     try {
-                        // Only rewrite if it's a valid URL
-                        new URL(value);
-                        value = rewriteUrl(value);
+                        const parts = url.split(PROXY_PREFIX);
+                        return decodeURIComponent(parts[parts.length - 1]);
+                    } catch (e) {}
+                }
+                return url;
+            }
+
+            function getCurrentDomain() {
+                try {
+                    const url = unproxyUrl(window.location.href);
+                    return new URL(url).hostname;
+                } catch (e) {
+                    return 'default';
+                }
+            }
+
+            function isApiRequest(url) {
+                if (!url || typeof url !== 'string') return false;
+                const urlLower = url.toLowerCase();
+                const apiPatterns = [
+                    '/api/', '/v1/', '/v2/', '/v3/', '/v4/', '/v5/',
+                    '/graphql', '/rest/', '/rpc/', '/service/', '/auth/',
+                    '/oauth/', '/token', '/login', '/signin', '/register',
+                    '/upload', '/post', '/put', '/delete', '/patch',
+                    '/ajax', '/json', '/rpc', '/gateway'
+                ];
+                return apiPatterns.some(pattern => urlLower.includes(pattern));
+            }
+
+            // --- Cookie handling ---
+            const cookieDescriptor = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');
+            if (cookieDescriptor) {
+                Object.defineProperty(document, 'cookie', {
+                    get: function() {
+                        // Get cookies for current domain from service worker
+                        const domain = getCurrentDomain();
+                        const cookies = cookieDescriptor.get.call(this);
+                        // Filter and return only relevant cookies
+                        return cookies || '';
+                    },
+                    set: function(value) {
+                        const domain = getCurrentDomain();
+                        if (!value.includes('; Domain=') && !value.includes('; domain=')) {
+                            value += \`; Domain=\${domain}\`;
+                        }
+                        return cookieDescriptor.set.call(this, value);
+                    }
+                });
+            }
+
+            // --- Enhanced fetch API ---
+            const nativeFetch = window.fetch;
+            window.fetch = async function(input, init) {
+                let url = typeof input === 'string' ? input : input.url;
+                const isApi = isApiRequest(url);
+                
+                const domain = getCurrentDomain();
+                if (init && typeof init === 'object') {
+                    init.headers = new Headers(init.headers || {});
+                    const cookies = document.cookie;
+                    if (cookies) {
+                        init.headers.set('Cookie', cookies);
+                    }
+                    if (isApi) {
+                        init.headers.set('X-API-Request', 'true');
+                        init.headers.set('X-Proxied-Domain', domain);
+                    }
+                }
+                
+                const rewrittenInput = typeof input === 'string' ? rewriteUrl(input) : 
+                                      (input instanceof Request ? new Request(rewriteUrl(input.url), input) : input);
+                
+                const response = await nativeFetch.call(this, rewrittenInput, init);
+                
+                const setCookie = response.headers.get('set-cookie');
+                if (setCookie) {
+                    try {
+                        const newCookies = setCookie.split(',').map(c => c.trim());
+                        newCookies.forEach(cookie => {
+                            if (cookie) {
+                                document.cookie = cookie;
+                            }
+                        });
                     } catch(e) {}
                 }
-                return originalSetItem.call(this, key, value);
-            };
-        }
-    });
-
-    // --- PATCH window.postMessage ---
-    const nativePostMessage = window.postMessage;
-    window.postMessage = function(message, targetOrigin, transfer) {
-        // Could intercept and modify messages here
-        return nativePostMessage.call(this, message, targetOrigin, transfer);
-    };
-
-    // --- Enhanced Form Handling ---
-    const originalCreateElement = document.createElement;
-    document.createElement = function(tagName, options) {
-        const el = originalCreateElement.call(this, tagName, options);
-        const tag = tagName.toLowerCase();
-        
-        // Patch all elements with src/href/action attributes
-        if (['script', 'iframe', 'embed', 'audio', 'video', 'source', 'track'].includes(tag)) {
-            const originalSetAttribute = el.setAttribute;
-            el.setAttribute = function(name, value) {
-                if (name.toLowerCase() === 'src') value = rewriteUrl(value);
-                return originalSetAttribute.call(this, name, value);
-            };
-            Object.defineProperty(el, 'src', { 
-                get: () => unproxyUrl(el.getAttribute('src')), 
-                set: (val) => el.setAttribute('src', val) 
-            });
-        }
-        
-        if (['link', 'a', 'area', 'base'].includes(tag)) {
-            const attr = 'href';
-            const originalSetAttribute = el.setAttribute;
-            el.setAttribute = function(name, value) {
-                if (name.toLowerCase() === attr) value = rewriteUrl(value);
-                return originalSetAttribute.call(this, name, value);
-            };
-            Object.defineProperty(el, attr, { 
-                get: () => unproxyUrl(el.getAttribute(attr)), 
-                set: (val) => el.setAttribute(attr, val) 
-            });
-        }
-        
-        // Enhanced form handling
-        if (['form', 'button', 'input'].includes(tag)) {
-            if (tag === 'form') {
-                // Patch form action
-                const originalSetAttribute = el.setAttribute;
-                el.setAttribute = function(name, value) {
-                    if (name.toLowerCase() === 'action') value = rewriteUrl(value);
-                    return originalSetAttribute.call(this, name, value);
-                };
-                Object.defineProperty(el, 'action', { 
-                    get: () => unproxyUrl(el.getAttribute('action')), 
-                    set: (val) => el.setAttribute('action', val) 
-                });
                 
-                // Patch form method (to ensure POST/GET are handled correctly)
-                Object.defineProperty(el, 'method', {
-                    get: function() { return this.getAttribute('method') || 'GET'; },
-                    set: function(val) { this.setAttribute('method', val.toUpperCase()); }
-                });
+                return response;
+            };
+
+            // --- Enhanced form handling ---
+            function handleFormSubmission(form, event) {
+                if (!form) return false;
                 
-                // Patch form enctype
-                Object.defineProperty(el, 'enctype', {
-                    get: function() { return this.getAttribute('enctype') || 'application/x-www-form-urlencoded'; },
-                    set: function(val) { this.setAttribute('enctype', val); }
-                });
-            }
-            
-            if (tag === 'input' || tag === 'button') {
-                // Patch input/button form attributes
-                const originalSetAttribute = el.setAttribute;
-                el.setAttribute = function(name, value) {
-                    if (name.toLowerCase() === 'formaction') value = rewriteUrl(value);
-                    return originalSetAttribute.call(this, name, value);
-                };
-                Object.defineProperty(el, 'formAction', { 
-                    get: () => unproxyUrl(el.getAttribute('formaction')), 
-                    set: (val) => el.setAttribute('formaction', val) 
-                });
-            }
-        }
-        return el;
-    };
-
-    // --- Patch element prototypes for src/href/action ---
-    const elementPrototypes = [
-        HTMLImageElement, HTMLScriptElement, HTMLIFrameElement, 
-        HTMLAudioElement, HTMLVideoElement, HTMLEmbedElement, 
-        HTMLSourceElement, HTMLTrackElement
-    ];
-    elementPrototypes.forEach(proto => {
-        if (!proto) return;
-        const desc = Object.getOwnPropertyDescriptor(proto.prototype, 'src');
-        if (!desc) return;
-        Object.defineProperty(proto.prototype, 'src', { 
-            get: function() { return unproxyUrl(desc.get.call(this)); }, 
-            set: function(val) { desc.set.call(this, rewriteUrl(val)); } 
-        });
-    });
-
-    const linkPrototypes = [HTMLAnchorElement, HTMLLinkElement, HTMLAreaElement];
-    linkPrototypes.forEach(proto => {
-        if (!proto) return;
-        const desc = Object.getOwnPropertyDescriptor(proto.prototype, 'href');
-        if (!desc) return;
-        Object.defineProperty(proto.prototype, 'href', { 
-            get: function() { return unproxyUrl(desc.get.call(this)); }, 
-            set: function(val) { desc.set.call(this, rewriteUrl(val)); } 
-        });
-    });
-
-    // --- Comprehensive Form Submission Interception ---
-    function interceptFormSubmission(form, event) {
-        if (!form) return false;
-        
-        // Get the form's target URL
-        let actionUrl = form.getAttribute('action') || window.location.href;
-        const method = (form.getAttribute('method') || 'GET').toUpperCase();
-        const enctype = form.getAttribute('enctype') || 'application/x-www-form-urlencoded';
-        
-        // Check if this is an API request
-        const isApi = isApiRequest(actionUrl);
-        
-        // Rewrite the action URL
-        const rewrittenAction = rewriteUrl(actionUrl);
-        form.setAttribute('action', rewrittenAction);
-        
-        // For GET forms, we need to handle query parameters
-        if (method === 'GET') {
-            try {
+                const action = form.getAttribute('action') || window.location.href;
+                const method = (form.getAttribute('method') || 'GET').toUpperCase();
+                const enctype = form.getAttribute('enctype') || 'application/x-www-form-urlencoded';
+                const isApi = isApiRequest(action);
+                
                 const formData = new FormData(form);
-                const urlObj = new URL(rewrittenAction, simulatedTarget.href);
+                const domain = getCurrentDomain();
                 
-                // Convert FormData to URL params for GET
-                for (let [key, val] of formData.entries()) {
-                    if (typeof val === 'string') urlObj.searchParams.append(key, val);
-                }
+                const rewrittenAction = rewriteUrl(action);
+                form.setAttribute('action', rewrittenAction);
                 
-                // Update the form action with query string
-                form.setAttribute('action', urlObj.href);
-                
-                // Prevent default to avoid double submission
                 if (event) {
                     event.preventDefault();
+                    event.stopPropagation();
                 }
                 
-                // Navigate using fetch to intercept the response
-                fetch(urlObj.href, {
-                    method: 'GET',
-                    headers: {
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-                    }
-                }).then(response => {
-                    if (response.ok) {
-                        return response.text();
-                    }
-                    throw new Error('Network response was not ok');
-                }).then(html => {
-                    // Replace current page with the response
-                    document.open();
-                    document.write(html);
-                    document.close();
-                }).catch(error => {
-                    console.error('[sw-helper] Form submission failed:', error);
-                });
-                
-                return true;
-            } catch(e) {
-                console.error('[sw-helper] Error processing GET form:', e);
-            }
-        }
-        
-        // For POST/PUT/DELETE forms, we need to handle form data
-        if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
-            // If the form uses multipart/form-data, we need to handle it specially
-            if (enctype === 'multipart/form-data') {
-                // The browser will handle this naturally with the rewritten action
-                return false;
-            }
-            
-            // For URL-encoded forms, we can intercept and modify
-            if (enctype === 'application/x-www-form-urlencoded') {
-                const formData = new FormData(form);
-                const params = new URLSearchParams();
-                for (let [key, val] of formData.entries()) {
-                    if (typeof val === 'string') params.append(key, val);
-                }
-                
-                // Prevent default submission
-                if (event) {
-                    event.preventDefault();
-                }
-                
-                // Send the data via fetch
-                fetch(rewrittenAction, {
+                const options = {
                     method: method,
                     headers: {
-                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'X-Form-Submission': 'true',
+                        'X-Original-Action': action,
+                        'X-Proxied-Domain': domain
                     },
-                    body: params.toString()
-                }).then(response => {
-                    if (response.ok) {
-                        // Handle the response
-                        return response.text();
+                    credentials: 'include'
+                };
+                
+                if (method === 'GET') {
+                    const url = new URL(rewrittenAction);
+                    for (let [key, value] of formData.entries()) {
+                        if (Array.isArray(value)) {
+                            value.forEach(v => url.searchParams.append(key + '[]', v));
+                        } else {
+                            url.searchParams.append(key, value);
+                        }
                     }
-                    throw new Error('Network response was not ok');
-                }).then(data => {
-                    // Navigate or update page based on response
-                    if (data) {
-                        document.open();
-                        document.write(data);
-                        document.close();
+                    window.location.href = url.href;
+                    return true;
+                }
+                
+                if (enctype === 'multipart/form-data') {
+                    options.body = formData;
+                } else {
+                    options.headers['Content-Type'] = enctype;
+                    const params = new URLSearchParams();
+                    for (let [key, value] of formData.entries()) {
+                        if (Array.isArray(value)) {
+                            value.forEach(v => params.append(key + '[]', v));
+                        } else {
+                            params.append(key, value);
+                        }
                     }
-                }).catch(error => {
-                    console.error('[sw-helper] Form submission failed:', error);
-                });
+                    options.body = params.toString();
+                }
+                
+                fetch(rewrittenAction, options)
+                    .then(response => {
+                        if (response.redirected) {
+                            window.location.href = response.url;
+                            return;
+                        }
+                        return response.text().then(html => {
+                            const contentType = response.headers.get('content-type') || '';
+                            if (contentType.includes('text/html')) {
+                                document.open();
+                                document.write(html);
+                                document.close();
+                            }
+                        });
+                    })
+                    .catch(error => {
+                        console.error('[sw-helper] Form submission failed:', error);
+                    });
                 
                 return true;
             }
-        }
-        
-        return false;
-    }
 
-    // --- Intercept form submit events ---
-    document.addEventListener('submit', function(event) {
-        const form = event.target;
-        if (form && form.tagName && form.tagName.toLowerCase() === 'form') {
-            // Intercept and handle the form submission
-            const intercepted = interceptFormSubmission(form, event);
-            if (intercepted) {
-                // Form was handled by our interceptor
-                return;
-            }
+            // --- Intercept form submissions ---
+            document.addEventListener('submit', function(event) {
+                const form = event.target;
+                if (form && form.tagName && form.tagName.toLowerCase() === 'form') {
+                    if (form.dataset.intercepted) return;
+                    form.dataset.intercepted = 'true';
+                    handleFormSubmission(form, event);
+                }
+            }, true);
+
+            // --- Override HTMLFormElement.prototype.submit ---
+            const originalFormSubmit = HTMLFormElement.prototype.submit;
+            HTMLFormElement.prototype.submit = function() {
+                if (this.dataset && this.dataset.intercepted) {
+                    return originalFormSubmit.call(this);
+                }
+                if (this.dataset) this.dataset.intercepted = 'true';
+                handleFormSubmission(this);
+            };
+
+            // --- Enhanced XMLHttpRequest ---
+            const nativeXHROpen = XMLHttpRequest.prototype.open;
+            const nativeXHRSend = XMLHttpRequest.prototype.send;
             
-            // Otherwise, just rewrite the action
-            const action = form.getAttribute('action');
-            if (action && !action.startsWith(PROXY_PREFIX)) {
-                form.setAttribute('action', rewriteUrl(action));
-            }
-        }
-    }, true);
-
-    // --- Override HTMLFormElement.prototype.submit ---
-    const originalFormSubmit = HTMLFormElement.prototype.submit;
-    HTMLFormElement.prototype.submit = function() {
-        // Try to intercept first
-        const intercepted = interceptFormSubmission(this);
-        if (intercepted) {
-            // Form was handled, prevent native submission
-            return;
-        }
-        
-        // Fallback to original submit behavior
-        const action = this.getAttribute('action');
-        if (action && !action.startsWith(PROXY_PREFIX)) {
-            this.setAttribute('action', rewriteUrl(action));
-        }
-        
-        // Check if we need to rewrite any input values
-        const inputs = this.querySelectorAll('input, select, textarea');
-        inputs.forEach(input => {
-            if (input.value && typeof input.value === 'string') {
-                // Check if value contains URLs
-                if (input.value.includes('http://') || input.value.includes('https://')) {
+            XMLHttpRequest.prototype.open = function(method, url, ...args) {
+                this._method = method;
+                this._originalUrl = url;
+                this._isApi = isApiRequest(url);
+                this._domain = getCurrentDomain();
+                
+                const rewrittenUrl = rewriteUrl(url);
+                return nativeXHROpen.call(this, method, rewrittenUrl, ...args);
+            };
+            
+            XMLHttpRequest.prototype.send = function(body) {
+                const cookies = document.cookie;
+                if (cookies) {
+                    this.setRequestHeader('Cookie', cookies);
+                }
+                if (this._isApi) {
+                    this.setRequestHeader('X-API-Request', 'true');
+                    this.setRequestHeader('X-Proxied-Domain', this._domain);
+                }
+                
+                if (body instanceof FormData && this._isApi) {
+                    const entries = Array.from(body.entries());
+                    if (entries.length > 0) {
+                        console.log('[sw-helper] API FormData:', entries);
+                    }
+                }
+                
+                if (typeof body === 'string' && this._isApi) {
                     try {
-                        const url = new URL(input.value);
-                        // Only rewrite if it's a valid URL
-                        input.value = rewriteUrl(input.value);
+                        const params = new URLSearchParams(body);
+                        for (let [key, value] of params) {
+                            if (value.includes('http://') || value.includes('https://')) {
+                                try {
+                                    new URL(value);
+                                    params.set(key, rewriteUrl(value));
+                                } catch(e) {}
+                            }
+                        }
+                        body = params.toString();
                     } catch(e) {}
                 }
-            }
-        });
-        
-        return originalFormSubmit.call(this);
-    };
-
-    // --- Intercept fetch API for API requests ---
-    const originalFetch = window.fetch;
-    window.fetch = function(input, init) {
-        // Check if this is an API request
-        let url = typeof input === 'string' ? input : input.url;
-        if (isApiRequest(url)) {
-            // Modify headers for API requests
-            init = init || {};
-            init.headers = new Headers(init.headers || {});
-            
-            // Add custom headers to identify proxied API requests
-            init.headers.set('X-Proxied-API', 'true');
-            
-            // For JSON APIs, ensure proper content type
-            if (init.headers.get('Content-Type') === 'application/json') {
-                // We could intercept and modify the body here
-                if (init.body) {
-                    try {
-                        const body = typeof init.body === 'string' ? JSON.parse(init.body) : init.body;
-                        // Could modify body here if needed
-                        init.body = JSON.stringify(body);
-                    } catch(e) {}
-                }
-            }
-        }
-        
-        // Rewrite the URL
-        const rewrittenInput = typeof input === 'string' ? rewriteUrl(input) : 
-                              (input instanceof Request ? new Request(rewriteUrl(input.url), input) : input);
-        
-        return originalFetch.call(this, rewrittenInput, init);
-    };
-
-    // --- Patch XMLHttpRequest for API requests ---
-    const originalXHROpen = XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open = function(method, url, ...args) {
-        this._method = method;
-        this._originalUrl = url;
-        
-        // Check if API request
-        if (isApiRequest(url)) {
-            this._isApiRequest = true;
-        }
-        
-        const rewrittenUrl = rewriteUrl(url);
-        return originalXHROpen.call(this, method, rewrittenUrl, ...args);
-    };
-
-    // --- Patch XMLHttpRequest.setRequestHeader for API ---
-    const originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
-    XMLHttpRequest.prototype.setRequestHeader = function(header, value) {
-        if (this._isApiRequest) {
-            // Could modify headers here
-            if (header.toLowerCase() === 'content-type') {
-                // Handle content-type for API requests
-            }
-        }
-        return originalSetRequestHeader.call(this, header, value);
-    };
-
-    // --- Location mocking (existing) ---
-    const locationMock = new Proxy({}, {
-        get(target, prop) {
-            if (prop === 'reload') return () => window.location.reload();
-            if (prop === 'replace') return (url) => window.location.replace(rewriteUrl(url));
-            if (prop === 'assign') return (url) => window.location.assign(rewriteUrl(url));
-            if (prop === 'toString') return () => simulatedTarget.href;
-            return simulatedTarget[prop];
-        },
-        set(target, prop, value) {
-            if (typeof prop === 'string' && prop in simulatedTarget) {
-                simulatedTarget[prop] = value;
-                window.location.href = rewriteUrl(simulatedTarget.href);
-                return true;
-            }
-            return false;
-        }
-    });
-
-    const originalGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
-    Object.getOwnPropertyDescriptor = function(obj, prop) {
-        if ((obj === window || obj === document) && prop === 'location') {
-            return { get: () => locationMock, configurable: true, enumerable: true };
-        }
-        return originalGetOwnPropertyDescriptor.apply(this, arguments);
-    };
-
-    try {
-        Object.defineProperty(window, 'location', { get: () => locationMock, set: (val) => { window.location.href = rewriteUrl(val); } });
-        Object.defineProperty(document, 'location', { get: () => locationMock, set: (val) => { window.location.href = rewriteUrl(val); } });
-        
-        Object.defineProperty(window, 'top', { get: () => window, configurable: true });
-        Object.defineProperty(window, 'parent', { get: () => window, configurable: true });
-        Object.defineProperty(window, 'self', { get: () => window, configurable: true });
-    } catch(e) {}
-
-    // --- Additional attribute patching ---
-    const nativeSetAttribute = Element.prototype.setAttribute;
-    Element.prototype.setAttribute = function(name, value) {
-        const attr = name.toLowerCase();
-        if (attr === 'href' || attr === 'src' || attr === 'action' || attr === 'formaction' || attr === 'navigation-url') {
-            value = rewriteUrl(value);
-        }
-        return nativeSetAttribute.call(this, name, value);
-    };
-
-    // --- MutationObserver for dynamic content ---
-    const pathObserver = new MutationObserver((mutations) => {
-        mutations.forEach((mutation) => {
-            if (mutation.type === 'attributes' && ['href', 'src', 'action', 'formaction'].includes(mutation.attributeName)) {
-                const targetEl = mutation.target;
-                const currentVal = targetEl.getAttribute(mutation.attributeName);
-                if (currentVal && !currentVal.startsWith(PROXY_PREFIX) && !currentVal.startsWith(PROXY_ORIGIN + PROXY_PREFIX)) {
-                    targetEl.setAttribute(mutation.attributeName, rewriteUrl(currentVal));
-                }
-            }
-            // Check for dynamically added forms
-            if (mutation.type === 'childList') {
-                mutation.addedNodes.forEach(node => {
-                    if (node.tagName && node.tagName.toLowerCase() === 'form') {
-                        const action = node.getAttribute('action');
-                        if (action && !action.startsWith(PROXY_PREFIX)) {
-                            node.setAttribute('action', rewriteUrl(action));
+                
+                const originalOnReadyStateChange = this.onreadystatechange;
+                this.onreadystatechange = function(...args) {
+                    if (this.readyState === 4) {
+                        const setCookie = this.getResponseHeader('set-cookie');
+                        if (setCookie) {
+                            try {
+                                const cookies = setCookie.split(',').map(c => c.trim());
+                                cookies.forEach(cookie => {
+                                    if (cookie) {
+                                        document.cookie = cookie;
+                                    }
+                                });
+                            } catch(e) {}
                         }
                     }
+                    if (originalOnReadyStateChange) {
+                        originalOnReadyStateChange.apply(this, args);
+                    }
+                };
+                
+                return nativeXHRSend.call(this, body);
+            };
+
+            // --- Enhanced WebSocket ---
+            const NativeWebSocket = window.WebSocket;
+            window.WebSocket = function(url, protocols) {
+                try {
+                    const baseContext = window.location.href;
+                    const targetUrl = new URL(url, baseContext);
+                    const domain = getCurrentDomain();
+                    
+                    const wsScheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                    const interceptWsRoute = \`\${wsScheme}//\${PROXY_HOST}/ws/?target=\${encodeURIComponent(targetUrl.href)}&domain=\${domain}\`;
+                    
+                    return new NativeWebSocket(interceptWsRoute, protocols);
+                } catch(e) {
+                    return new NativeWebSocket(url, protocols);
+                }
+            };
+            window.WebSocket.prototype = NativeWebSocket.prototype;
+
+            // --- Enhanced Element attribute patching ---
+            const nativeSetAttribute = Element.prototype.setAttribute;
+            Element.prototype.setAttribute = function(name, value) {
+                const attr = name.toLowerCase();
+                if (['href', 'src', 'action', 'formaction', 'data-url', 'navigation-url'].includes(attr)) {
+                    if (typeof value === 'string' && !value.startsWith(PROXY_PREFIX)) {
+                        if (!value.startsWith('http://') && !value.startsWith('https://') && !value.startsWith('/')) {
+                            const base = window.location.href;
+                            try {
+                                const resolved = new URL(value, base);
+                                value = rewriteUrl(resolved.href);
+                            } catch(e) {
+                                value = rewriteUrl(value);
+                            }
+                        } else {
+                            value = rewriteUrl(value);
+                        }
+                    }
+                }
+                return nativeSetAttribute.call(this, name, value);
+            };
+
+            // --- Enhanced createElement ---
+            const originalCreateElement = document.createElement;
+            document.createElement = function(tagName, options) {
+                const el = originalCreateElement.call(this, tagName, options);
+                const tag = tagName.toLowerCase();
+                
+                const srcElements = ['script', 'iframe', 'embed', 'audio', 'video', 'source', 'track', 'img'];
+                if (srcElements.includes(tag)) {
+                    const originalSetAttribute = el.setAttribute;
+                    el.setAttribute = function(name, value) {
+                        if (name.toLowerCase() === 'src') {
+                            value = rewriteUrl(value);
+                        }
+                        return originalSetAttribute.call(this, name, value);
+                    };
+                    Object.defineProperty(el, 'src', {
+                        get: function() { return unproxyUrl(this.getAttribute('src')); },
+                        set: function(val) { this.setAttribute('src', val); }
+                    });
+                }
+                
+                const hrefElements = ['link', 'a', 'area', 'base'];
+                if (hrefElements.includes(tag)) {
+                    const originalSetAttribute = el.setAttribute;
+                    el.setAttribute = function(name, value) {
+                        if (name.toLowerCase() === 'href') {
+                            value = rewriteUrl(value);
+                        }
+                        return originalSetAttribute.call(this, name, value);
+                    };
+                    Object.defineProperty(el, 'href', {
+                        get: function() { return unproxyUrl(this.getAttribute('href')); },
+                        set: function(val) { this.setAttribute('href', val); }
+                    });
+                }
+                
+                if (tag === 'form') {
+                    const originalSetAttribute = el.setAttribute;
+                    el.setAttribute = function(name, value) {
+                        if (name.toLowerCase() === 'action') {
+                            value = rewriteUrl(value);
+                        }
+                        return originalSetAttribute.call(this, name, value);
+                    };
+                    Object.defineProperty(el, 'action', {
+                        get: function() { return unproxyUrl(this.getAttribute('action')); },
+                        set: function(val) { this.setAttribute('action', val); }
+                    });
+                    
+                    el.addEventListener('submit', function(event) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        handleFormSubmission(this, event);
+                    }, true);
+                }
+                
+                return el;
+            };
+
+            // --- MutationObserver for dynamic content ---
+            const observer = new MutationObserver((mutations) => {
+                mutations.forEach((mutation) => {
+                    if (mutation.type === 'attributes') {
+                        const attr = mutation.attributeName;
+                        if (['href', 'src', 'action', 'formaction'].includes(attr)) {
+                            const el = mutation.target;
+                            const value = el.getAttribute(attr);
+                            if (value && !value.startsWith(PROXY_PREFIX)) {
+                                try {
+                                    el.setAttribute(attr, rewriteUrl(value));
+                                } catch(e) {}
+                            }
+                        }
+                    }
+                    
+                    if (mutation.type === 'childList') {
+                        mutation.addedNodes.forEach(node => {
+                            if (node.nodeType === 1) {
+                                if (node.tagName && node.tagName.toLowerCase() === 'form') {
+                                    const action = node.getAttribute('action');
+                                    if (action && !action.startsWith(PROXY_PREFIX)) {
+                                        node.setAttribute('action', rewriteUrl(action));
+                                    }
+                                    node.addEventListener('submit', function(event) {
+                                        event.preventDefault();
+                                        event.stopPropagation();
+                                        handleFormSubmission(this, event);
+                                    }, true);
+                                }
+                                
+                                ['src', 'href', 'action'].forEach(attr => {
+                                    if (node.hasAttribute && node.hasAttribute(attr)) {
+                                        const value = node.getAttribute(attr);
+                                        if (value && !value.startsWith(PROXY_PREFIX)) {
+                                            try {
+                                                node.setAttribute(attr, rewriteUrl(value));
+                                            } catch(e) {}
+                                        }
+                                    }
+                                });
+                            }
+                        });
+                    }
+                });
+            });
+
+            if (document.documentElement) {
+                observer.observe(document.documentElement, {
+                    attributes: true,
+                    childList: true,
+                    subtree: true,
+                    attributeFilter: ['href', 'src', 'action', 'formaction']
                 });
             }
-        });
-    });
 
-    if (document.documentElement) {
-        pathObserver.observe(document.documentElement, { 
-            attributes: true, 
-            subtree: true, 
-            attributeFilter: ['href', 'src', 'action', 'formaction', 'navigation-url'] 
-        });
-    } else {
-        window.addEventListener('DOMContentLoaded', () => {
-            pathObserver.observe(document.documentElement, { 
-                attributes: true, 
-                subtree: true, 
-                attributeFilter: ['href', 'src', 'action', 'formaction', 'navigation-url'] 
+            // --- History API ---
+            const nativePushState = window.history.pushState;
+            window.history.pushState = function(state, title, url) {
+                if (url) {
+                    state = state || {};
+                    state._originalUrl = unproxyUrl(url.toString());
+                    state._domain = getCurrentDomain();
+                    url = rewriteUrl(url.toString());
+                }
+                return nativePushState.call(this, state, title, url);
+            };
+
+            const nativeReplaceState = window.history.replaceState;
+            window.history.replaceState = function(state, title, url) {
+                if (url) {
+                    state = state || {};
+                    state._originalUrl = unproxyUrl(url.toString());
+                    state._domain = getCurrentDomain();
+                    url = rewriteUrl(url.toString());
+                }
+                return nativeReplaceState.call(this, state, title, url);
+            };
+
+            // --- window.open ---
+            const nativeOpen = window.open;
+            window.open = function(url, target, features) {
+                if (url) {
+                    url = rewriteUrl(url.toString());
+                    const domain = getCurrentDomain();
+                    url += (url.includes('?') ? '&' : '?') + 'domain=' + encodeURIComponent(domain);
+                }
+                return nativeOpen.call(this, url, target, features);
+            };
+
+            // --- Location mock ---
+            const locationMock = new Proxy({}, {
+                get(target, prop) {
+                    if (prop === 'reload') return () => window.location.reload();
+                    if (prop === 'replace') return (url) => {
+                        url = rewriteUrl(url);
+                        window.location.replace(url);
+                    };
+                    if (prop === 'assign') return (url) => {
+                        url = rewriteUrl(url);
+                        window.location.assign(url);
+                    };
+                    if (prop === 'toString') return () => window.location.href;
+                    return window.location[prop];
+                },
+                set(target, prop, value) {
+                    if (prop === 'href') {
+                        value = rewriteUrl(value);
+                        window.location.href = value;
+                        return true;
+                    }
+                    return false;
+                }
             });
-        });
+
+            const originalGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+            Object.getOwnPropertyDescriptor = function(obj, prop) {
+                if ((obj === window || obj === document) && prop === 'location') {
+                    return { get: () => locationMock, configurable: true, enumerable: true };
+                }
+                return originalGetOwnPropertyDescriptor.apply(this, arguments);
+            };
+
+            try {
+                Object.defineProperty(window, 'location', { get: () => locationMock, set: (val) => { window.location.href = rewriteUrl(val); } });
+                Object.defineProperty(document, 'location', { get: () => locationMock, set: (val) => { window.location.href = rewriteUrl(val); } });
+            } catch(e) {}
+
+            console.log("[sw-helper] Rewriter initialized successfully!");
+        \`;
+
+        // Insert the script into the page
+        const firstScript = document.querySelector('script');
+        if (firstScript && firstScript.parentNode) {
+            firstScript.parentNode.insertBefore(script, firstScript);
+        } else {
+            document.head.appendChild(script);
+        }
     }
 
-    // --- Patch window.open ---
-    const nativeOpen = window.open;
-    window.open = function(url, target, features) {
-        if (url) url = rewriteUrl(url.toString());
-        return nativeOpen.call(this, url, target, features);
-    };
+    // --- Execute injection ---
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', injectRewriter);
+    } else {
+        injectRewriter();
+    }
 
-    // --- Patch document.write and document.writeln for inline scripts ---
-    const originalWrite = document.write;
-    document.write = function(html) {
-        if (typeof html === 'string') {
-            // Could rewrite URLs in dynamically written HTML
-            // This is complex and might break things, so we're cautious
-        }
-        return originalWrite.call(this, html);
-    };
+    // Also inject immediately if possible
+    setTimeout(injectRewriter, 0);
 
-    console.log("[sw-helper] All APIs patched successfully!");
 })();`;
 
-// ... (rest of your code remains the same)
+// ==========================================
+// SERVICE WORKER FETCH HANDLER
+// ==========================================
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+
+self.addEventListener('fetch', (event) => {
+    const requestUrl = new URL(event.request.url);
+
+    // Serve rewriter script
+    if (requestUrl.pathname === '/rewriter.js') {
+        event.respondWith(new Response(REWRITER_SOURCE, { 
+            headers: { 'Content-Type': 'application/javascript; charset=utf-8' } 
+        }));
+        return;
+    }
+
+    // Skip loop guard
+    if (event.request.headers.get('X-Proxy-Loop-Guard')) return;
+
+    // Handle proxy requests
+    if (requestUrl.pathname.startsWith(PROXY_PREFIX)) {
+        const encodedTarget = requestUrl.pathname.substring(PROXY_PREFIX.length);
+        if (!encodedTarget) return;
+
+        const handleRequest = async () => {
+            while (!libcurlReady) {
+                await new Promise(resolve => setTimeout(resolve, 50));
+            }
+
+            const targetUrl = new URL(decodeURIComponent(encodedTarget));
+            const domain = targetUrl.hostname;
+            
+            const cookies = cookieManager.getCookies(targetUrl.href);
+            
+            const modifiedHeaders = new Headers(event.request.headers);
+            modifiedHeaders.delete('accept-encoding');
+            modifiedHeaders.set('X-Proxy-Loop-Guard', 'true');
+            
+            if (cookies) {
+                modifiedHeaders.set('Cookie', cookies);
+            }
+
+            let fetchMode = event.request.mode;
+            if (fetchMode === 'same-origin' || fetchMode === 'navigate') fetchMode = 'cors';
+
+            const fetchOptions = {
+                method: event.request.method,
+                headers: modifiedHeaders,
+                redirect: 'follow',
+                mode: fetchMode,
+                credentials: 'omit'
+            };
+
+            if (!['GET', 'HEAD'].includes(event.request.method)) {
+                fetchOptions.body = event.request.body;
+                if (event.request.body) fetchOptions.duplex = 'half';
+            }
+
+            try {
+                const response = await libcurl.fetch(targetUrl.href, fetchOptions);
+                const contentType = response.headers.get('content-type') || '';
+                const responseHeaders = new Headers(response.headers);
+                
+                // Handle cookies from response
+                const setCookie = responseHeaders.get('set-cookie');
+                if (setCookie) {
+                    cookieManager.setCookies(targetUrl.href, setCookie);
+                }
+                
+                // CRITICAL: Remove or modify CSP headers to allow our script injection
+                responseHeaders.delete('content-security-policy');
+                responseHeaders.delete('content-security-policy-report-only');
+                responseHeaders.delete('x-content-security-policy');
+                responseHeaders.delete('x-webkit-csp');
+                responseHeaders.delete('x-frame-options');
+                responseHeaders.delete('cross-origin-opener-policy');
+                responseHeaders.delete('cross-origin-embedder-policy');
+                responseHeaders.delete('cross-origin-resource-policy');
+                responseHeaders.set('Access-Control-Allow-Origin', '*');
+                
+                // Handle redirects
+                if (responseHeaders.has('location')) {
+                    const loc = responseHeaders.get('location');
+                    try {
+                        const absoluteLoc = new URL(loc, targetUrl.href).href;
+                        responseHeaders.set('location', `${self.location.origin}${PROXY_PREFIX}${encodeURIComponent(absoluteLoc)}`);
+                    } catch (e) {}
+                }
+
+                // Handle HTML content
+                if (contentType.includes('text/html')) {
+                    let html = await response.text();
+                    
+                    // Extract nonce from CSP if present
+                    let nonce = '';
+                    const cspMatch = html.match(/script-src[^;]*'nonce-([^']+)'/);
+                    if (cspMatch) {
+                        nonce = cspMatch[1];
+                    }
+                    
+                    // Inject rewriter script with proper nonce
+                    const injectorScript = nonce ? 
+                        `<script nonce="${nonce}" src="/rewriter.js"></script>` :
+                        `<script src="/rewriter.js"></script>`;
+                    
+                    if (html.match(/<head>/i)) {
+                        html = html.replace(/<head>/i, `<head>${injectorScript}`);
+                    } else if (html.match(/<html>/i)) {
+                        html = html.replace(/<html>/i, `<html>${injectorScript}`);
+                    } else {
+                        html = injectorScript + html;
+                    }
+                    
+                    // Rewrite URLs in HTML
+                    html = proxyTextContent(html, targetUrl.origin);
+                    return new Response(html, { 
+                        status: response.status, 
+                        statusText: response.statusText, 
+                        headers: responseHeaders 
+                    });
+                }
+                
+                // Handle JavaScript and CSS
+                if (contentType.includes('application/javascript') || contentType.includes('text/css')) {
+                    let text = await response.text();
+                    text = proxyTextContent(text, targetUrl.origin);
+                    return new Response(text, { 
+                        status: response.status, 
+                        statusText: response.statusText, 
+                        headers: responseHeaders 
+                    });
+                }
+
+                return new Response(response.body, { 
+                    status: response.status, 
+                    statusText: response.statusText, 
+                    headers: responseHeaders 
+                });
+            } catch (err) {
+                return new Response(generateErrorPage(err.message, 502), { 
+                    status: 502, 
+                    headers: { 'Content-Type': 'text/html' } 
+                });
+            }
+        };
+
+        event.respondWith(handleRequest());
+        return;
+    }
+
+    // Handle fallback proxy for external requests
+    if (requestUrl.origin !== self.location.origin) {
+        const fallbackProxyUrl = `${self.location.origin}${PROXY_PREFIX}${encodeURIComponent(event.request.url)}`;
+        let fallbackMode = event.request.mode;
+        if (fallbackMode === 'navigate' || fallbackMode === 'same-origin') fallbackMode = 'cors';
+
+        const fallbackOptions = { 
+            method: event.request.method, 
+            headers: event.request.headers, 
+            redirect: 'follow', 
+            mode: fallbackMode 
+        };
+        if (!['GET', 'HEAD'].includes(event.request.method)) {
+            fallbackOptions.body = event.request.body;
+            if (event.request.body) fallbackOptions.duplex = 'half';
+        }
+        event.respondWith(
+            fetch(fallbackProxyUrl, fallbackOptions).catch((err) => {
+                return new Response(generateErrorPage(err.message, 502), { 
+                    status: 502, 
+                    headers: { 'Content-Type': 'text/html' } 
+                });
+            })
+        );
+        return;
+    }
+
+    // Handle internal asset requests
+    if (requestUrl.origin === self.location.origin && 
+        !requestUrl.pathname.startsWith(PROXY_PREFIX) && 
+        !['/index.html', '/sw.js', '/favicon.ico'].includes(requestUrl.pathname)) {
+        
+        const assetPath = requestUrl.pathname + requestUrl.search;
+        let dynamicMode = event.request.mode;
+        if (dynamicMode === 'navigate' || dynamicMode === 'same-origin') dynamicMode = 'cors';
+
+        event.respondWith(
+            self.clients.matchAll({ type: 'window' }).then((clients) => {
+                let fallbackContextUrl = null;
+                if (clients && clients.length > 0) {
+                    if (event.clientId) {
+                        const targetClient = clients.find(c => c.id === event.clientId);
+                        if (targetClient && targetClient.url.includes(PROXY_PREFIX)) fallbackContextUrl = targetClient.url;
+                    }
+                    if (!fallbackContextUrl) {
+                        const proxiedClient = clients.find(c => new URL(c.url).pathname.startsWith(PROXY_PREFIX));
+                        if (proxiedClient) fallbackContextUrl = proxiedClient.url;
+                    }
+                }
+                if (!fallbackContextUrl && clients && clients.length > 0) fallbackContextUrl = clients[0].url;
+
+                if (fallbackContextUrl) {
+                    try {
+                        const clientUrlObj = new URL(fallbackContextUrl);
+                        let targetOrigin = "";
+                        if (clientUrlObj.pathname.startsWith(PROXY_PREFIX)) {
+                            const currentProxyTargetEncoded = clientUrlObj.pathname.substring(PROXY_PREFIX.length);
+                            targetOrigin = new URL(decodeURIComponent(currentProxyTargetEncoded)).origin;
+                        } else {
+                            targetOrigin = 'https://default.com';
+                        }
+                        
+                        const correctedUrl = `${self.location.origin}${PROXY_PREFIX}${encodeURIComponent(targetOrigin + assetPath)}`;
+                        if (event.request.mode === 'navigate') {
+                            return Response.redirect(correctedUrl, 302);
+                        }
+
+                        const dynamicOptions = { 
+                            method: event.request.method, 
+                            headers: event.request.headers, 
+                            mode: dynamicMode 
+                        };
+                        if (!['GET', 'HEAD'].includes(event.request.method)) {
+                            dynamicOptions.body = event.request.body;
+                            if (event.request.body) dynamicOptions.duplex = 'half';
+                        }
+                        return fetch(correctedUrl, dynamicOptions);
+                    } catch (e) {}
+                }
+                return fetch(event.request);
+            }).catch((err) => {
+                return new Response(generateErrorPage(err.message, 502), { 
+                    status: 502, 
+                    headers: { 'Content-Type': 'text/html' } 
+                });
+            })
+        );
+        return;
+    }
+});
+
+// ==========================================
+// Helper Functions
+// ==========================================
+
+function proxyTextContent(text, targetOrigin) {
+    if (typeof text !== 'string') return text;
+    const absoluteUrlPattern = /(https?:\/\/[a-zA-Z0-9\-._~:/?#[\]@!$&'()*+,;=]+)/g;
+    let processed = text.replace(absoluteUrlPattern, (match) => {
+        if (match.includes(PROXY_PREFIX) || match.startsWith(self.location.origin)) return match;
+        return `${self.location.origin}${PROXY_PREFIX}${encodeURIComponent(match)}`;
+    });
+
+    const attrPattern = /\b(href|src|action)=["']([^"']+)["']/gi;
+    processed = processed.replace(attrPattern, (match, attr, val) => {
+        if (val.startsWith('#') || val.startsWith('javascript:') || val.startsWith('data:') || val.includes(PROXY_PREFIX)) return match;
+        try {
+            const resolved = new URL(val, targetOrigin).href;
+            return `${attr}="${self.location.origin}${PROXY_PREFIX}${encodeURIComponent(resolved)}"`;
+        } catch (e) { return match; }
+    });
+    return processed;
+}
+
+function generateErrorPage(errorMessage, status) {
+    return `<!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Error</title>
+        <style>
+            body { background: #111; color: #eee; font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
+            .card { background: #1a1a1a; padding: 40px; border-radius: 12px; border: 1px solid #333; max-width: 500px; width: 100%; text-align: center; box-shadow: 0 8px 30px rgba(0,0,0,0.5); }
+            h1 { color: #ff4a4a; font-size: 24px; margin-top: 0; }
+            p { color: #aaa; font-size: 15px; line-height: 1.6; margin-bottom: 25px; }
+            .badge { background: #2a1b1b; color: #ff6b6b; padding: 6px 12px; border-radius: 4px; font-family: monospace; font-size: 13px; display: inline-block; margin-bottom: 20px; border: 1px solid #4a2222; }
+            button { background: #0070f3; color: white; border: none; padding: 12px 24px; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 14px; transition: background 0.2s; }
+            button:hover { background: #0051cb; }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <div class="badge">Status ${status || 502}</div>
+            <h1>Failed to Load Page</h1>
+            <p>${errorMessage || 'An error occurred while trying to load the page.'}</p>
+            <button onclick="window.location.reload()">Retry</button>
+        </div>
+    </body>
+    </html>`;
+}
