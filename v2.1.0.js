@@ -1,6 +1,4 @@
-// ==========================================
-// ULTIMATE BROWSER API PATCHER - Zero Breakout
-// ==========================================
+
 const PROXY_PREFIX = '/go/';
 const WISP_SERVER_URL = 'wss://wisp.mercurywork.shop/wisp/'; 
 
