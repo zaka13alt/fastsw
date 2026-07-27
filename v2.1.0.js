@@ -1,5 +1,5 @@
 // ==========================================
-// Enhanced Service Worker with CSP Handling
+// Enhanced Service Worker with Proper Rewriter Loading
 // ==========================================
 const PROXY_PREFIX = '/go/';
 const WISP_SERVER_URL = 'wss://wisp.mercurywork.shop/wisp/'; 
@@ -122,14 +122,18 @@ class CookieManager {
 const cookieManager = new CookieManager();
 
 // ==========================================
-// ENHANCED REWRITER - CSP Compliant
+// REWRITER SCRIPT - CSP Compliant
 // ==========================================
-const REWRITER_SOURCE = `(function() {
+const REWRITER_SCRIPT = `(function() {
+    // Check if already initialized
+    if (window.__rewriter_initialized) return;
+    window.__rewriter_initialized = true;
+
     const PROXY_PREFIX = '/go/';
     const PROXY_HOST = window.location.host;
     const PROXY_ORIGIN = window.location.origin;
+    const REWRITER_ORIGIN = '${self.location.origin}';
 
-    // Get current proxied domain
     function getCurrentDomain() {
         try {
             const url = unproxyUrl(window.location.href);
@@ -157,6 +161,8 @@ const REWRITER_SOURCE = `(function() {
         const trimmed = url.trim();
         if (trimmed.startsWith('data:') || trimmed.startsWith('blob:') || trimmed.startsWith('javascript:')) return url;
         if (trimmed.startsWith(PROXY_PREFIX) || trimmed.startsWith(PROXY_ORIGIN + PROXY_PREFIX)) return url;
+        // Don't rewrite the rewriter script itself
+        if (trimmed.includes('/rewriter.js')) return url;
         try {
             const baseContext = window.location.href;
             const resolved = new URL(trimmed, baseContext).href;
@@ -177,562 +183,468 @@ const REWRITER_SOURCE = `(function() {
         return url;
     }
 
-    // --- CSP Compliant Script Injection ---
-    function injectRewriter() {
-        // Check if already injected
-        if (window._rewriterInjected) return;
-        window._rewriterInjected = true;
-
-        // Try to find any existing nonce in the page
-        let nonce = '';
-        const scripts = document.querySelectorAll('script');
-        for (const script of scripts) {
-            if (script.nonce) {
-                nonce = script.nonce;
-                break;
+    // --- Cookie handling ---
+    const cookieDescriptor = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');
+    if (cookieDescriptor) {
+        Object.defineProperty(document, 'cookie', {
+            get: function() {
+                const domain = getCurrentDomain();
+                const cookies = cookieDescriptor.get.call(this);
+                return cookies || '';
+            },
+            set: function(value) {
+                const domain = getCurrentDomain();
+                if (!value.includes('; Domain=') && !value.includes('; domain=')) {
+                    value += \`; Domain=\${domain}\`;
+                }
+                return cookieDescriptor.set.call(this, value);
             }
-        }
+        });
+    }
 
-        // Create a new script element with proper attributes
-        const script = document.createElement('script');
-        if (nonce) {
-            script.setAttribute('nonce', nonce);
-        }
-        script.setAttribute('data-rewriter', 'true');
+    // --- Enhanced fetch API ---
+    const nativeFetch = window.fetch;
+    window.fetch = async function(input, init) {
+        let url = typeof input === 'string' ? input : input.url;
+        const isApi = isApiRequest(url);
         
-        // Use inline script with the full rewriter code
-        // This avoids CSP issues with external scripts
-        script.textContent = \`
-            // Rewriter core functions
-            const PROXY_PREFIX = '/go/';
-            const PROXY_HOST = window.location.host;
-            const PROXY_ORIGIN = window.location.origin;
-
-            function rewriteUrl(url) {
-                if (!url || typeof url !== 'string') return url;
-                const trimmed = url.trim();
-                if (trimmed.startsWith('data:') || trimmed.startsWith('blob:') || trimmed.startsWith('javascript:')) return url;
-                if (trimmed.startsWith(PROXY_PREFIX) || trimmed.startsWith(PROXY_ORIGIN + PROXY_PREFIX)) return url;
-                try {
-                    const baseContext = window.location.href;
-                    const resolved = new URL(trimmed, baseContext).href;
-                    return PROXY_PREFIX + encodeURIComponent(resolved);
-                } catch (e) {
-                    return url;
-                }
+        const domain = getCurrentDomain();
+        if (init && typeof init === 'object') {
+            init.headers = new Headers(init.headers || {});
+            const cookies = document.cookie;
+            if (cookies) {
+                init.headers.set('Cookie', cookies);
             }
-
-            function unproxyUrl(url) {
-                if (!url || typeof url !== 'string') return url;
-                if (url.includes(PROXY_PREFIX)) {
-                    try {
-                        const parts = url.split(PROXY_PREFIX);
-                        return decodeURIComponent(parts[parts.length - 1]);
-                    } catch (e) {}
-                }
-                return url;
+            if (isApi) {
+                init.headers.set('X-API-Request', 'true');
+                init.headers.set('X-Proxied-Domain', domain);
             }
-
-            function getCurrentDomain() {
-                try {
-                    const url = unproxyUrl(window.location.href);
-                    return new URL(url).hostname;
-                } catch (e) {
-                    return 'default';
-                }
-            }
-
-            function isApiRequest(url) {
-                if (!url || typeof url !== 'string') return false;
-                const urlLower = url.toLowerCase();
-                const apiPatterns = [
-                    '/api/', '/v1/', '/v2/', '/v3/', '/v4/', '/v5/',
-                    '/graphql', '/rest/', '/rpc/', '/service/', '/auth/',
-                    '/oauth/', '/token', '/login', '/signin', '/register',
-                    '/upload', '/post', '/put', '/delete', '/patch',
-                    '/ajax', '/json', '/rpc', '/gateway'
-                ];
-                return apiPatterns.some(pattern => urlLower.includes(pattern));
-            }
-
-            // --- Cookie handling ---
-            const cookieDescriptor = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');
-            if (cookieDescriptor) {
-                Object.defineProperty(document, 'cookie', {
-                    get: function() {
-                        // Get cookies for current domain from service worker
-                        const domain = getCurrentDomain();
-                        const cookies = cookieDescriptor.get.call(this);
-                        // Filter and return only relevant cookies
-                        return cookies || '';
-                    },
-                    set: function(value) {
-                        const domain = getCurrentDomain();
-                        if (!value.includes('; Domain=') && !value.includes('; domain=')) {
-                            value += \`; Domain=\${domain}\`;
-                        }
-                        return cookieDescriptor.set.call(this, value);
+        }
+        
+        const rewrittenInput = typeof input === 'string' ? rewriteUrl(input) : 
+                              (input instanceof Request ? new Request(rewriteUrl(input.url), input) : input);
+        
+        const response = await nativeFetch.call(this, rewrittenInput, init);
+        
+        const setCookie = response.headers.get('set-cookie');
+        if (setCookie) {
+            try {
+                const newCookies = setCookie.split(',').map(c => c.trim());
+                newCookies.forEach(cookie => {
+                    if (cookie) {
+                        document.cookie = cookie;
                     }
                 });
-            }
+            } catch(e) {}
+        }
+        
+        return response;
+    };
 
-            // --- Enhanced fetch API ---
-            const nativeFetch = window.fetch;
-            window.fetch = async function(input, init) {
-                let url = typeof input === 'string' ? input : input.url;
-                const isApi = isApiRequest(url);
-                
-                const domain = getCurrentDomain();
-                if (init && typeof init === 'object') {
-                    init.headers = new Headers(init.headers || {});
-                    const cookies = document.cookie;
-                    if (cookies) {
-                        init.headers.set('Cookie', cookies);
+    // --- Enhanced form handling ---
+    function handleFormSubmission(form, event) {
+        if (!form) return false;
+        
+        const action = form.getAttribute('action') || window.location.href;
+        const method = (form.getAttribute('method') || 'GET').toUpperCase();
+        const enctype = form.getAttribute('enctype') || 'application/x-www-form-urlencoded';
+        const isApi = isApiRequest(action);
+        
+        const formData = new FormData(form);
+        const domain = getCurrentDomain();
+        
+        const rewrittenAction = rewriteUrl(action);
+        form.setAttribute('action', rewrittenAction);
+        
+        if (event) {
+            event.preventDefault();
+            event.stopPropagation();
+        }
+        
+        const options = {
+            method: method,
+            headers: {
+                'X-Form-Submission': 'true',
+                'X-Original-Action': action,
+                'X-Proxied-Domain': domain
+            },
+            credentials: 'include'
+        };
+        
+        if (method === 'GET') {
+            const url = new URL(rewrittenAction);
+            for (let [key, value] of formData.entries()) {
+                if (Array.isArray(value)) {
+                    value.forEach(v => url.searchParams.append(key + '[]', v));
+                } else {
+                    url.searchParams.append(key, value);
+                }
+            }
+            window.location.href = url.href;
+            return true;
+        }
+        
+        if (enctype === 'multipart/form-data') {
+            options.body = formData;
+        } else {
+            options.headers['Content-Type'] = enctype;
+            const params = new URLSearchParams();
+            for (let [key, value] of formData.entries()) {
+                if (Array.isArray(value)) {
+                    value.forEach(v => params.append(key + '[]', v));
+                } else {
+                    params.append(key, value);
+                }
+            }
+            options.body = params.toString();
+        }
+        
+        fetch(rewrittenAction, options)
+            .then(response => {
+                if (response.redirected) {
+                    window.location.href = response.url;
+                    return;
+                }
+                return response.text().then(html => {
+                    const contentType = response.headers.get('content-type') || '';
+                    if (contentType.includes('text/html')) {
+                        document.open();
+                        document.write(html);
+                        document.close();
                     }
-                    if (isApi) {
-                        init.headers.set('X-API-Request', 'true');
-                        init.headers.set('X-Proxied-Domain', domain);
+                });
+            })
+            .catch(error => {
+                console.error('[sw-helper] Form submission failed:', error);
+            });
+        
+        return true;
+    }
+
+    // --- Intercept form submissions ---
+    document.addEventListener('submit', function(event) {
+        const form = event.target;
+        if (form && form.tagName && form.tagName.toLowerCase() === 'form') {
+            if (form.dataset.intercepted) return;
+            form.dataset.intercepted = 'true';
+            handleFormSubmission(form, event);
+        }
+    }, true);
+
+    // --- Override HTMLFormElement.prototype.submit ---
+    const originalFormSubmit = HTMLFormElement.prototype.submit;
+    HTMLFormElement.prototype.submit = function() {
+        if (this.dataset && this.dataset.intercepted) {
+            return originalFormSubmit.call(this);
+        }
+        if (this.dataset) this.dataset.intercepted = 'true';
+        handleFormSubmission(this);
+    };
+
+    // --- Enhanced XMLHttpRequest ---
+    const nativeXHROpen = XMLHttpRequest.prototype.open;
+    const nativeXHRSend = XMLHttpRequest.prototype.send;
+    
+    XMLHttpRequest.prototype.open = function(method, url, ...args) {
+        this._method = method;
+        this._originalUrl = url;
+        this._isApi = isApiRequest(url);
+        this._domain = getCurrentDomain();
+        
+        const rewrittenUrl = rewriteUrl(url);
+        return nativeXHROpen.call(this, method, rewrittenUrl, ...args);
+    };
+    
+    XMLHttpRequest.prototype.send = function(body) {
+        const cookies = document.cookie;
+        if (cookies) {
+            this.setRequestHeader('Cookie', cookies);
+        }
+        if (this._isApi) {
+            this.setRequestHeader('X-API-Request', 'true');
+            this.setRequestHeader('X-Proxied-Domain', this._domain);
+        }
+        
+        if (body instanceof FormData && this._isApi) {
+            const entries = Array.from(body.entries());
+            if (entries.length > 0) {
+                console.log('[sw-helper] API FormData:', entries);
+            }
+        }
+        
+        if (typeof body === 'string' && this._isApi) {
+            try {
+                const params = new URLSearchParams(body);
+                for (let [key, value] of params) {
+                    if (value.includes('http://') || value.includes('https://')) {
+                        try {
+                            new URL(value);
+                            params.set(key, rewriteUrl(value));
+                        } catch(e) {}
                     }
                 }
-                
-                const rewrittenInput = typeof input === 'string' ? rewriteUrl(input) : 
-                                      (input instanceof Request ? new Request(rewriteUrl(input.url), input) : input);
-                
-                const response = await nativeFetch.call(this, rewrittenInput, init);
-                
-                const setCookie = response.headers.get('set-cookie');
+                body = params.toString();
+            } catch(e) {}
+        }
+        
+        const originalOnReadyStateChange = this.onreadystatechange;
+        this.onreadystatechange = function(...args) {
+            if (this.readyState === 4) {
+                const setCookie = this.getResponseHeader('set-cookie');
                 if (setCookie) {
                     try {
-                        const newCookies = setCookie.split(',').map(c => c.trim());
-                        newCookies.forEach(cookie => {
+                        const cookies = setCookie.split(',').map(c => c.trim());
+                        cookies.forEach(cookie => {
                             if (cookie) {
                                 document.cookie = cookie;
                             }
                         });
                     } catch(e) {}
                 }
-                
-                return response;
-            };
+            }
+            if (originalOnReadyStateChange) {
+                originalOnReadyStateChange.apply(this, args);
+            }
+        };
+        
+        return nativeXHRSend.call(this, body);
+    };
 
-            // --- Enhanced form handling ---
-            function handleFormSubmission(form, event) {
-                if (!form) return false;
-                
-                const action = form.getAttribute('action') || window.location.href;
-                const method = (form.getAttribute('method') || 'GET').toUpperCase();
-                const enctype = form.getAttribute('enctype') || 'application/x-www-form-urlencoded';
-                const isApi = isApiRequest(action);
-                
-                const formData = new FormData(form);
-                const domain = getCurrentDomain();
-                
-                const rewrittenAction = rewriteUrl(action);
-                form.setAttribute('action', rewrittenAction);
-                
-                if (event) {
-                    event.preventDefault();
-                    event.stopPropagation();
-                }
-                
-                const options = {
-                    method: method,
-                    headers: {
-                        'X-Form-Submission': 'true',
-                        'X-Original-Action': action,
-                        'X-Proxied-Domain': domain
-                    },
-                    credentials: 'include'
-                };
-                
-                if (method === 'GET') {
-                    const url = new URL(rewrittenAction);
-                    for (let [key, value] of formData.entries()) {
-                        if (Array.isArray(value)) {
-                            value.forEach(v => url.searchParams.append(key + '[]', v));
-                        } else {
-                            url.searchParams.append(key, value);
+    // --- Enhanced WebSocket ---
+    const NativeWebSocket = window.WebSocket;
+    window.WebSocket = function(url, protocols) {
+        try {
+            const baseContext = window.location.href;
+            const targetUrl = new URL(url, baseContext);
+            const domain = getCurrentDomain();
+            
+            const wsScheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const interceptWsRoute = \`\${wsScheme}//\${PROXY_HOST}/ws/?target=\${encodeURIComponent(targetUrl.href)}&domain=\${domain}\`;
+            
+            return new NativeWebSocket(interceptWsRoute, protocols);
+        } catch(e) {
+            return new NativeWebSocket(url, protocols);
+        }
+    };
+    window.WebSocket.prototype = NativeWebSocket.prototype;
+
+    // --- Enhanced Element attribute patching ---
+    const nativeSetAttribute = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function(name, value) {
+        const attr = name.toLowerCase();
+        if (['href', 'src', 'action', 'formaction', 'data-url', 'navigation-url'].includes(attr)) {
+            if (typeof value === 'string' && !value.startsWith(PROXY_PREFIX)) {
+                // Don't rewrite rewriter script
+                if (!value.includes('/rewriter.js')) {
+                    if (!value.startsWith('http://') && !value.startsWith('https://') && !value.startsWith('/')) {
+                        const base = window.location.href;
+                        try {
+                            const resolved = new URL(value, base);
+                            value = rewriteUrl(resolved.href);
+                        } catch(e) {
+                            value = rewriteUrl(value);
                         }
+                    } else {
+                        value = rewriteUrl(value);
                     }
-                    window.location.href = url.href;
-                    return true;
                 }
-                
-                if (enctype === 'multipart/form-data') {
-                    options.body = formData;
-                } else {
-                    options.headers['Content-Type'] = enctype;
-                    const params = new URLSearchParams();
-                    for (let [key, value] of formData.entries()) {
-                        if (Array.isArray(value)) {
-                            value.forEach(v => params.append(key + '[]', v));
-                        } else {
-                            params.append(key, value);
-                        }
+            }
+        }
+        return nativeSetAttribute.call(this, name, value);
+    };
+
+    // --- Enhanced createElement ---
+    const originalCreateElement = document.createElement;
+    document.createElement = function(tagName, options) {
+        const el = originalCreateElement.call(this, tagName, options);
+        const tag = tagName.toLowerCase();
+        
+        const srcElements = ['script', 'iframe', 'embed', 'audio', 'video', 'source', 'track', 'img'];
+        if (srcElements.includes(tag)) {
+            const originalSetAttribute = el.setAttribute;
+            el.setAttribute = function(name, value) {
+                if (name.toLowerCase() === 'src') {
+                    if (!value.includes('/rewriter.js')) {
+                        value = rewriteUrl(value);
                     }
-                    options.body = params.toString();
                 }
-                
-                fetch(rewrittenAction, options)
-                    .then(response => {
-                        if (response.redirected) {
-                            window.location.href = response.url;
-                            return;
+                return originalSetAttribute.call(this, name, value);
+            };
+            Object.defineProperty(el, 'src', {
+                get: function() { return unproxyUrl(this.getAttribute('src')); },
+                set: function(val) { this.setAttribute('src', val); }
+            });
+        }
+        
+        const hrefElements = ['link', 'a', 'area', 'base'];
+        if (hrefElements.includes(tag)) {
+            const originalSetAttribute = el.setAttribute;
+            el.setAttribute = function(name, value) {
+                if (name.toLowerCase() === 'href') {
+                    if (!value.includes('/rewriter.js')) {
+                        value = rewriteUrl(value);
+                    }
+                }
+                return originalSetAttribute.call(this, name, value);
+            };
+            Object.defineProperty(el, 'href', {
+                get: function() { return unproxyUrl(this.getAttribute('href')); },
+                set: function(val) { this.setAttribute('href', val); }
+            });
+        }
+        
+        if (tag === 'form') {
+            const originalSetAttribute = el.setAttribute;
+            el.setAttribute = function(name, value) {
+                if (name.toLowerCase() === 'action') {
+                    value = rewriteUrl(value);
+                }
+                return originalSetAttribute.call(this, name, value);
+            };
+            Object.defineProperty(el, 'action', {
+                get: function() { return unproxyUrl(this.getAttribute('action')); },
+                set: function(val) { this.setAttribute('action', val); }
+            });
+            
+            el.addEventListener('submit', function(event) {
+                event.preventDefault();
+                event.stopPropagation();
+                handleFormSubmission(this, event);
+            }, true);
+        }
+        
+        return el;
+    };
+
+    // --- MutationObserver for dynamic content ---
+    const observer = new MutationObserver((mutations) => {
+        mutations.forEach((mutation) => {
+            if (mutation.type === 'attributes') {
+                const attr = mutation.attributeName;
+                if (['href', 'src', 'action', 'formaction'].includes(attr)) {
+                    const el = mutation.target;
+                    const value = el.getAttribute(attr);
+                    if (value && !value.startsWith(PROXY_PREFIX) && !value.includes('/rewriter.js')) {
+                        try {
+                            el.setAttribute(attr, rewriteUrl(value));
+                        } catch(e) {}
+                    }
+                }
+            }
+            
+            if (mutation.type === 'childList') {
+                mutation.addedNodes.forEach(node => {
+                    if (node.nodeType === 1) {
+                        if (node.tagName && node.tagName.toLowerCase() === 'form') {
+                            const action = node.getAttribute('action');
+                            if (action && !action.startsWith(PROXY_PREFIX)) {
+                                node.setAttribute('action', rewriteUrl(action));
+                            }
+                            node.addEventListener('submit', function(event) {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                handleFormSubmission(this, event);
+                            }, true);
                         }
-                        return response.text().then(html => {
-                            const contentType = response.headers.get('content-type') || '';
-                            if (contentType.includes('text/html')) {
-                                document.open();
-                                document.write(html);
-                                document.close();
+                        
+                        ['src', 'href', 'action'].forEach(attr => {
+                            if (node.hasAttribute && node.hasAttribute(attr)) {
+                                const value = node.getAttribute(attr);
+                                if (value && !value.startsWith(PROXY_PREFIX) && !value.includes('/rewriter.js')) {
+                                    try {
+                                        node.setAttribute(attr, rewriteUrl(value));
+                                    } catch(e) {}
+                                }
                             }
                         });
-                    })
-                    .catch(error => {
-                        console.error('[sw-helper] Form submission failed:', error);
-                    });
-                
+                    }
+                });
+            }
+        });
+    });
+
+    if (document.documentElement) {
+        observer.observe(document.documentElement, {
+            attributes: true,
+            childList: true,
+            subtree: true,
+            attributeFilter: ['href', 'src', 'action', 'formaction']
+        });
+    }
+
+    // --- History API ---
+    const nativePushState = window.history.pushState;
+    window.history.pushState = function(state, title, url) {
+        if (url) {
+            state = state || {};
+            state._originalUrl = unproxyUrl(url.toString());
+            state._domain = getCurrentDomain();
+            url = rewriteUrl(url.toString());
+        }
+        return nativePushState.call(this, state, title, url);
+    };
+
+    const nativeReplaceState = window.history.replaceState;
+    window.history.replaceState = function(state, title, url) {
+        if (url) {
+            state = state || {};
+            state._originalUrl = unproxyUrl(url.toString());
+            state._domain = getCurrentDomain();
+            url = rewriteUrl(url.toString());
+        }
+        return nativeReplaceState.call(this, state, title, url);
+    };
+
+    // --- window.open ---
+    const nativeOpen = window.open;
+    window.open = function(url, target, features) {
+        if (url) {
+            url = rewriteUrl(url.toString());
+            const domain = getCurrentDomain();
+            url += (url.includes('?') ? '&' : '?') + 'domain=' + encodeURIComponent(domain);
+        }
+        return nativeOpen.call(this, url, target, features);
+    };
+
+    // --- Location mock ---
+    const locationMock = new Proxy({}, {
+        get(target, prop) {
+            if (prop === 'reload') return () => window.location.reload();
+            if (prop === 'replace') return (url) => {
+                url = rewriteUrl(url);
+                window.location.replace(url);
+            };
+            if (prop === 'assign') return (url) => {
+                url = rewriteUrl(url);
+                window.location.assign(url);
+            };
+            if (prop === 'toString') return () => window.location.href;
+            return window.location[prop];
+        },
+        set(target, prop, value) {
+            if (prop === 'href') {
+                value = rewriteUrl(value);
+                window.location.href = value;
                 return true;
             }
-
-            // --- Intercept form submissions ---
-            document.addEventListener('submit', function(event) {
-                const form = event.target;
-                if (form && form.tagName && form.tagName.toLowerCase() === 'form') {
-                    if (form.dataset.intercepted) return;
-                    form.dataset.intercepted = 'true';
-                    handleFormSubmission(form, event);
-                }
-            }, true);
-
-            // --- Override HTMLFormElement.prototype.submit ---
-            const originalFormSubmit = HTMLFormElement.prototype.submit;
-            HTMLFormElement.prototype.submit = function() {
-                if (this.dataset && this.dataset.intercepted) {
-                    return originalFormSubmit.call(this);
-                }
-                if (this.dataset) this.dataset.intercepted = 'true';
-                handleFormSubmission(this);
-            };
-
-            // --- Enhanced XMLHttpRequest ---
-            const nativeXHROpen = XMLHttpRequest.prototype.open;
-            const nativeXHRSend = XMLHttpRequest.prototype.send;
-            
-            XMLHttpRequest.prototype.open = function(method, url, ...args) {
-                this._method = method;
-                this._originalUrl = url;
-                this._isApi = isApiRequest(url);
-                this._domain = getCurrentDomain();
-                
-                const rewrittenUrl = rewriteUrl(url);
-                return nativeXHROpen.call(this, method, rewrittenUrl, ...args);
-            };
-            
-            XMLHttpRequest.prototype.send = function(body) {
-                const cookies = document.cookie;
-                if (cookies) {
-                    this.setRequestHeader('Cookie', cookies);
-                }
-                if (this._isApi) {
-                    this.setRequestHeader('X-API-Request', 'true');
-                    this.setRequestHeader('X-Proxied-Domain', this._domain);
-                }
-                
-                if (body instanceof FormData && this._isApi) {
-                    const entries = Array.from(body.entries());
-                    if (entries.length > 0) {
-                        console.log('[sw-helper] API FormData:', entries);
-                    }
-                }
-                
-                if (typeof body === 'string' && this._isApi) {
-                    try {
-                        const params = new URLSearchParams(body);
-                        for (let [key, value] of params) {
-                            if (value.includes('http://') || value.includes('https://')) {
-                                try {
-                                    new URL(value);
-                                    params.set(key, rewriteUrl(value));
-                                } catch(e) {}
-                            }
-                        }
-                        body = params.toString();
-                    } catch(e) {}
-                }
-                
-                const originalOnReadyStateChange = this.onreadystatechange;
-                this.onreadystatechange = function(...args) {
-                    if (this.readyState === 4) {
-                        const setCookie = this.getResponseHeader('set-cookie');
-                        if (setCookie) {
-                            try {
-                                const cookies = setCookie.split(',').map(c => c.trim());
-                                cookies.forEach(cookie => {
-                                    if (cookie) {
-                                        document.cookie = cookie;
-                                    }
-                                });
-                            } catch(e) {}
-                        }
-                    }
-                    if (originalOnReadyStateChange) {
-                        originalOnReadyStateChange.apply(this, args);
-                    }
-                };
-                
-                return nativeXHRSend.call(this, body);
-            };
-
-            // --- Enhanced WebSocket ---
-            const NativeWebSocket = window.WebSocket;
-            window.WebSocket = function(url, protocols) {
-                try {
-                    const baseContext = window.location.href;
-                    const targetUrl = new URL(url, baseContext);
-                    const domain = getCurrentDomain();
-                    
-                    const wsScheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                    const interceptWsRoute = \`\${wsScheme}//\${PROXY_HOST}/ws/?target=\${encodeURIComponent(targetUrl.href)}&domain=\${domain}\`;
-                    
-                    return new NativeWebSocket(interceptWsRoute, protocols);
-                } catch(e) {
-                    return new NativeWebSocket(url, protocols);
-                }
-            };
-            window.WebSocket.prototype = NativeWebSocket.prototype;
-
-            // --- Enhanced Element attribute patching ---
-            const nativeSetAttribute = Element.prototype.setAttribute;
-            Element.prototype.setAttribute = function(name, value) {
-                const attr = name.toLowerCase();
-                if (['href', 'src', 'action', 'formaction', 'data-url', 'navigation-url'].includes(attr)) {
-                    if (typeof value === 'string' && !value.startsWith(PROXY_PREFIX)) {
-                        if (!value.startsWith('http://') && !value.startsWith('https://') && !value.startsWith('/')) {
-                            const base = window.location.href;
-                            try {
-                                const resolved = new URL(value, base);
-                                value = rewriteUrl(resolved.href);
-                            } catch(e) {
-                                value = rewriteUrl(value);
-                            }
-                        } else {
-                            value = rewriteUrl(value);
-                        }
-                    }
-                }
-                return nativeSetAttribute.call(this, name, value);
-            };
-
-            // --- Enhanced createElement ---
-            const originalCreateElement = document.createElement;
-            document.createElement = function(tagName, options) {
-                const el = originalCreateElement.call(this, tagName, options);
-                const tag = tagName.toLowerCase();
-                
-                const srcElements = ['script', 'iframe', 'embed', 'audio', 'video', 'source', 'track', 'img'];
-                if (srcElements.includes(tag)) {
-                    const originalSetAttribute = el.setAttribute;
-                    el.setAttribute = function(name, value) {
-                        if (name.toLowerCase() === 'src') {
-                            value = rewriteUrl(value);
-                        }
-                        return originalSetAttribute.call(this, name, value);
-                    };
-                    Object.defineProperty(el, 'src', {
-                        get: function() { return unproxyUrl(this.getAttribute('src')); },
-                        set: function(val) { this.setAttribute('src', val); }
-                    });
-                }
-                
-                const hrefElements = ['link', 'a', 'area', 'base'];
-                if (hrefElements.includes(tag)) {
-                    const originalSetAttribute = el.setAttribute;
-                    el.setAttribute = function(name, value) {
-                        if (name.toLowerCase() === 'href') {
-                            value = rewriteUrl(value);
-                        }
-                        return originalSetAttribute.call(this, name, value);
-                    };
-                    Object.defineProperty(el, 'href', {
-                        get: function() { return unproxyUrl(this.getAttribute('href')); },
-                        set: function(val) { this.setAttribute('href', val); }
-                    });
-                }
-                
-                if (tag === 'form') {
-                    const originalSetAttribute = el.setAttribute;
-                    el.setAttribute = function(name, value) {
-                        if (name.toLowerCase() === 'action') {
-                            value = rewriteUrl(value);
-                        }
-                        return originalSetAttribute.call(this, name, value);
-                    };
-                    Object.defineProperty(el, 'action', {
-                        get: function() { return unproxyUrl(this.getAttribute('action')); },
-                        set: function(val) { this.setAttribute('action', val); }
-                    });
-                    
-                    el.addEventListener('submit', function(event) {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        handleFormSubmission(this, event);
-                    }, true);
-                }
-                
-                return el;
-            };
-
-            // --- MutationObserver for dynamic content ---
-            const observer = new MutationObserver((mutations) => {
-                mutations.forEach((mutation) => {
-                    if (mutation.type === 'attributes') {
-                        const attr = mutation.attributeName;
-                        if (['href', 'src', 'action', 'formaction'].includes(attr)) {
-                            const el = mutation.target;
-                            const value = el.getAttribute(attr);
-                            if (value && !value.startsWith(PROXY_PREFIX)) {
-                                try {
-                                    el.setAttribute(attr, rewriteUrl(value));
-                                } catch(e) {}
-                            }
-                        }
-                    }
-                    
-                    if (mutation.type === 'childList') {
-                        mutation.addedNodes.forEach(node => {
-                            if (node.nodeType === 1) {
-                                if (node.tagName && node.tagName.toLowerCase() === 'form') {
-                                    const action = node.getAttribute('action');
-                                    if (action && !action.startsWith(PROXY_PREFIX)) {
-                                        node.setAttribute('action', rewriteUrl(action));
-                                    }
-                                    node.addEventListener('submit', function(event) {
-                                        event.preventDefault();
-                                        event.stopPropagation();
-                                        handleFormSubmission(this, event);
-                                    }, true);
-                                }
-                                
-                                ['src', 'href', 'action'].forEach(attr => {
-                                    if (node.hasAttribute && node.hasAttribute(attr)) {
-                                        const value = node.getAttribute(attr);
-                                        if (value && !value.startsWith(PROXY_PREFIX)) {
-                                            try {
-                                                node.setAttribute(attr, rewriteUrl(value));
-                                            } catch(e) {}
-                                        }
-                                    }
-                                });
-                            }
-                        });
-                    }
-                });
-            });
-
-            if (document.documentElement) {
-                observer.observe(document.documentElement, {
-                    attributes: true,
-                    childList: true,
-                    subtree: true,
-                    attributeFilter: ['href', 'src', 'action', 'formaction']
-                });
-            }
-
-            // --- History API ---
-            const nativePushState = window.history.pushState;
-            window.history.pushState = function(state, title, url) {
-                if (url) {
-                    state = state || {};
-                    state._originalUrl = unproxyUrl(url.toString());
-                    state._domain = getCurrentDomain();
-                    url = rewriteUrl(url.toString());
-                }
-                return nativePushState.call(this, state, title, url);
-            };
-
-            const nativeReplaceState = window.history.replaceState;
-            window.history.replaceState = function(state, title, url) {
-                if (url) {
-                    state = state || {};
-                    state._originalUrl = unproxyUrl(url.toString());
-                    state._domain = getCurrentDomain();
-                    url = rewriteUrl(url.toString());
-                }
-                return nativeReplaceState.call(this, state, title, url);
-            };
-
-            // --- window.open ---
-            const nativeOpen = window.open;
-            window.open = function(url, target, features) {
-                if (url) {
-                    url = rewriteUrl(url.toString());
-                    const domain = getCurrentDomain();
-                    url += (url.includes('?') ? '&' : '?') + 'domain=' + encodeURIComponent(domain);
-                }
-                return nativeOpen.call(this, url, target, features);
-            };
-
-            // --- Location mock ---
-            const locationMock = new Proxy({}, {
-                get(target, prop) {
-                    if (prop === 'reload') return () => window.location.reload();
-                    if (prop === 'replace') return (url) => {
-                        url = rewriteUrl(url);
-                        window.location.replace(url);
-                    };
-                    if (prop === 'assign') return (url) => {
-                        url = rewriteUrl(url);
-                        window.location.assign(url);
-                    };
-                    if (prop === 'toString') return () => window.location.href;
-                    return window.location[prop];
-                },
-                set(target, prop, value) {
-                    if (prop === 'href') {
-                        value = rewriteUrl(value);
-                        window.location.href = value;
-                        return true;
-                    }
-                    return false;
-                }
-            });
-
-            const originalGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
-            Object.getOwnPropertyDescriptor = function(obj, prop) {
-                if ((obj === window || obj === document) && prop === 'location') {
-                    return { get: () => locationMock, configurable: true, enumerable: true };
-                }
-                return originalGetOwnPropertyDescriptor.apply(this, arguments);
-            };
-
-            try {
-                Object.defineProperty(window, 'location', { get: () => locationMock, set: (val) => { window.location.href = rewriteUrl(val); } });
-                Object.defineProperty(document, 'location', { get: () => locationMock, set: (val) => { window.location.href = rewriteUrl(val); } });
-            } catch(e) {}
-
-            console.log("[sw-helper] Rewriter initialized successfully!");
-        \`;
-
-        // Insert the script into the page
-        const firstScript = document.querySelector('script');
-        if (firstScript && firstScript.parentNode) {
-            firstScript.parentNode.insertBefore(script, firstScript);
-        } else {
-            document.head.appendChild(script);
+            return false;
         }
-    }
+    });
 
-    // --- Execute injection ---
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', injectRewriter);
-    } else {
-        injectRewriter();
-    }
+    const originalGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+    Object.getOwnPropertyDescriptor = function(obj, prop) {
+        if ((obj === window || obj === document) && prop === 'location') {
+            return { get: () => locationMock, configurable: true, enumerable: true };
+        }
+        return originalGetOwnPropertyDescriptor.apply(this, arguments);
+    };
 
-    // Also inject immediately if possible
-    setTimeout(injectRewriter, 0);
+    try {
+        Object.defineProperty(window, 'location', { get: () => locationMock, set: (val) => { window.location.href = rewriteUrl(val); } });
+        Object.defineProperty(document, 'location', { get: () => locationMock, set: (val) => { window.location.href = rewriteUrl(val); } });
+    } catch(e) {}
 
+    console.log("[sw-helper] Rewriter initialized successfully!");
 })();`;
 
 // ==========================================
@@ -744,10 +656,15 @@ self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 self.addEventListener('fetch', (event) => {
     const requestUrl = new URL(event.request.url);
 
-    // Serve rewriter script
+    // Serve rewriter script - ALWAYS from origin, not through proxy
     if (requestUrl.pathname === '/rewriter.js') {
-        event.respondWith(new Response(REWRITER_SOURCE, { 
-            headers: { 'Content-Type': 'application/javascript; charset=utf-8' } 
+        event.respondWith(new Response(REWRITER_SCRIPT, { 
+            headers: { 
+                'Content-Type': 'application/javascript; charset=utf-8',
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache',
+                'Expires': '0'
+            } 
         }));
         return;
     }
@@ -805,7 +722,7 @@ self.addEventListener('fetch', (event) => {
                     cookieManager.setCookies(targetUrl.href, setCookie);
                 }
                 
-                // CRITICAL: Remove or modify CSP headers to allow our script injection
+                // Remove security headers
                 responseHeaders.delete('content-security-policy');
                 responseHeaders.delete('content-security-policy-report-only');
                 responseHeaders.delete('x-content-security-policy');
@@ -836,10 +753,11 @@ self.addEventListener('fetch', (event) => {
                         nonce = cspMatch[1];
                     }
                     
-                    // Inject rewriter script with proper nonce
+                    // Inject rewriter script with proper nonce - use absolute URL
+                    const rewriterUrl = `${self.location.origin}/rewriter.js`;
                     const injectorScript = nonce ? 
-                        `<script nonce="${nonce}" src="/rewriter.js"></script>` :
-                        `<script src="/rewriter.js"></script>`;
+                        `<script nonce="${nonce}" src="${rewriterUrl}"></script>` :
+                        `<script src="${rewriterUrl}"></script>`;
                     
                     if (html.match(/<head>/i)) {
                         html = html.replace(/<head>/i, `<head>${injectorScript}`);
@@ -849,7 +767,7 @@ self.addEventListener('fetch', (event) => {
                         html = injectorScript + html;
                     }
                     
-                    // Rewrite URLs in HTML
+                    // Rewrite URLs in HTML (but skip rewriter.js)
                     html = proxyTextContent(html, targetUrl.origin);
                     return new Response(html, { 
                         status: response.status, 
@@ -916,7 +834,7 @@ self.addEventListener('fetch', (event) => {
     // Handle internal asset requests
     if (requestUrl.origin === self.location.origin && 
         !requestUrl.pathname.startsWith(PROXY_PREFIX) && 
-        !['/index.html', '/sw.js', '/favicon.ico'].includes(requestUrl.pathname)) {
+        !['/index.html', '/sw.js', '/favicon.ico', '/rewriter.js'].includes(requestUrl.pathname)) {
         
         const assetPath = requestUrl.pathname + requestUrl.search;
         let dynamicMode = event.request.mode;
@@ -986,12 +904,14 @@ function proxyTextContent(text, targetOrigin) {
     const absoluteUrlPattern = /(https?:\/\/[a-zA-Z0-9\-._~:/?#[\]@!$&'()*+,;=]+)/g;
     let processed = text.replace(absoluteUrlPattern, (match) => {
         if (match.includes(PROXY_PREFIX) || match.startsWith(self.location.origin)) return match;
+        if (match.includes('/rewriter.js')) return match;
         return `${self.location.origin}${PROXY_PREFIX}${encodeURIComponent(match)}`;
     });
 
     const attrPattern = /\b(href|src|action)=["']([^"']+)["']/gi;
     processed = processed.replace(attrPattern, (match, attr, val) => {
         if (val.startsWith('#') || val.startsWith('javascript:') || val.startsWith('data:') || val.includes(PROXY_PREFIX)) return match;
+        if (val.includes('/rewriter.js')) return match;
         try {
             const resolved = new URL(val, targetOrigin).href;
             return `${attr}="${self.location.origin}${PROXY_PREFIX}${encodeURIComponent(resolved)}"`;
