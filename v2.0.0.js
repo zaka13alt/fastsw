@@ -49,7 +49,7 @@ function waitForLibcurl() {
 }
 
 // ==========================================
-// FIXED CLIENT-SIDE REWRITER (No Illegal Invocations)
+// FIXED CLIENT-SIDE REWRITER
 // ==========================================
 const REWRITER = `(function() {
     'use strict';
@@ -92,19 +92,43 @@ const REWRITER = `(function() {
     }
     
     // ==========================================
-    // FETCH - Properly bound
+    // FETCH - Fixed with proper duplex handling
     // ==========================================
     const originalFetch = window.fetch;
     window.fetch = function(input, init) {
+        let modifiedInput = input;
+        
         if (typeof input === 'string') {
-            input = cachedRewriteUrl(input);
+            modifiedInput = cachedRewriteUrl(input);
         } else if (input && typeof input === 'object' && input.url) {
             const newUrl = cachedRewriteUrl(input.url);
             if (newUrl !== input.url) {
-                input = new Request(newUrl, input);
+                // Preserve all request properties
+                modifiedInput = new Request(newUrl, {
+                    method: input.method,
+                    headers: input.headers,
+                    body: input.body,
+                    mode: input.mode,
+                    credentials: input.credentials,
+                    cache: input.cache,
+                    redirect: input.redirect,
+                    referrer: input.referrer,
+                    referrerPolicy: input.referrerPolicy,
+                    integrity: input.integrity,
+                    keepalive: input.keepalive,
+                    signal: input.signal,
+                    // Add duplex for streaming bodies
+                    duplex: input.duplex || 'half'
+                });
             }
         }
-        return originalFetch.call(this, input, init);
+        
+        // If we have a body and no duplex, add it
+        if (init && init.body && !init.duplex) {
+            init.duplex = 'half';
+        }
+        
+        return originalFetch.call(this, modifiedInput, init);
     };
     
     // ==========================================
@@ -120,63 +144,57 @@ const REWRITER = `(function() {
     };
     
     // ==========================================
-    // LOCATION - Only override if needed
+    // LOCATION - Only intercept specific props
     // ==========================================
-    if (window.location.pathname.startsWith(PROXY_PREFIX)) {
-        const loc = window.location;
-        
-        // Get the actual URL
-        let actualUrl;
-        try {
-            const idx = loc.href.indexOf(PROXY_PREFIX);
-            if (idx !== -1) {
-                actualUrl = decodeURIComponent(loc.href.slice(idx + PROXY_PREFIX.length));
-            }
-        } catch(e) {}
-        
-        if (actualUrl) {
-            // Create a proxy that only intercepts specific properties
-            const locationHandler = {
-                get(target, prop) {
-                    if (prop === 'href') {
-                        return actualUrl;
-                    }
-                    if (prop === 'assign' || prop === 'replace') {
-                        return function(url) {
-                            target[prop](cachedRewriteUrl(url));
-                        };
-                    }
-                    if (prop === 'toString') {
-                        return () => actualUrl;
-                    }
-                    // For all other properties, use the original
-                    const value = target[prop];
-                    return typeof value === 'function' ? value.bind(target) : value;
-                },
-                set(target, prop, value) {
-                    if (prop === 'href') {
-                        target.href = cachedRewriteUrl(value);
-                        return true;
-                    }
-                    target[prop] = value;
+    const loc = window.location;
+    let actualUrl;
+    try {
+        const idx = loc.href.indexOf(PROXY_PREFIX);
+        if (idx !== -1) {
+            actualUrl = decodeURIComponent(loc.href.slice(idx + PROXY_PREFIX.length));
+        }
+    } catch(e) {}
+    
+    if (actualUrl) {
+        const locationHandler = {
+            get(target, prop) {
+                if (prop === 'href') {
+                    return actualUrl;
+                }
+                if (prop === 'assign' || prop === 'replace') {
+                    return function(url) {
+                        target[prop](cachedRewriteUrl(url));
+                    };
+                }
+                if (prop === 'toString' || prop === Symbol.toPrimitive) {
+                    return () => actualUrl;
+                }
+                const value = target[prop];
+                return typeof value === 'function' ? value.bind(target) : value;
+            },
+            set(target, prop, value) {
+                if (prop === 'href') {
+                    target.href = cachedRewriteUrl(value);
                     return true;
                 }
-            };
-            
-            try {
-                const locationProxy = new Proxy(loc, locationHandler);
-                Object.defineProperty(window, 'location', {
-                    get: () => locationProxy,
-                    configurable: true,
-                    enumerable: true
-                });
-                Object.defineProperty(document, 'location', {
-                    get: () => locationProxy,
-                    configurable: true,
-                    enumerable: true
-                });
-            } catch(e) {}
-        }
+                target[prop] = value;
+                return true;
+            }
+        };
+        
+        try {
+            const locationProxy = new Proxy(loc, locationHandler);
+            Object.defineProperty(window, 'location', {
+                get: () => locationProxy,
+                configurable: true,
+                enumerable: true
+            });
+            Object.defineProperty(document, 'location', {
+                get: () => locationProxy,
+                configurable: true,
+                enumerable: true
+            });
+        } catch(e) {}
     }
     
     // ==========================================
@@ -201,7 +219,7 @@ const REWRITER = `(function() {
     };
     
     // ==========================================
-    // WINDOW.OPEN - Properly bound
+    // WINDOW.OPEN
     // ==========================================
     const originalOpen = window.open;
     window.open = function(url, name, features) {
@@ -212,7 +230,7 @@ const REWRITER = `(function() {
     };
     
     // ==========================================
-    // ELEMENT ATTRIBUTES - Careful patching
+    // ELEMENT ATTRIBUTES
     // ==========================================
     const URL_ATTRS = ['href', 'src', 'action', 'data', 'poster'];
     const originalSetAttribute = Element.prototype.setAttribute;
@@ -220,23 +238,19 @@ const REWRITER = `(function() {
     Element.prototype.setAttribute = function(name, value) {
         const n = name.toLowerCase();
         if (URL_ATTRS.includes(n) && typeof value === 'string' && value) {
-            // Only rewrite if it's a URL that needs proxying
             if (!value.startsWith(PROXY_PREFIX) && !value.startsWith(PROXY_ORIGIN + PROXY_PREFIX) &&
                 !value.startsWith('data:') && !value.startsWith('blob:') && !value.startsWith('#')) {
                 try {
-                    // Check if it's a valid URL
                     new URL(value, window.location.href);
                     value = cachedRewriteUrl(value);
-                } catch(e) {
-                    // Not a URL, leave as is
-                }
+                } catch(e) {}
             }
         }
         return originalSetAttribute.call(this, name, value);
     };
     
     // ==========================================
-    // SRC SET - Only for images
+    // SRC SET
     // ==========================================
     const imgProto = HTMLImageElement.prototype;
     const originalSrcSet = Object.getOwnPropertyDescriptor(imgProto, 'srcset');
@@ -265,7 +279,17 @@ const REWRITER = `(function() {
     }
     
     // ==========================================
-    // MUTATION OBSERVER - Lightweight
+    // NAVIGATOR SEND BEACON
+    // ==========================================
+    if (navigator.sendBeacon) {
+        const originalSendBeacon = navigator.sendBeacon.bind(navigator);
+        navigator.sendBeacon = function(url, data) {
+            return originalSendBeacon(cachedRewriteUrl(url), data);
+        };
+    }
+    
+    // ==========================================
+    // MUTATION OBSERVER
     // ==========================================
     let observerActive = false;
     let observerTimeout = null;
@@ -298,7 +322,6 @@ const REWRITER = `(function() {
                     } else if (mutation.type === 'childList') {
                         for (const node of mutation.addedNodes) {
                             if (node.nodeType === 1 && node.querySelectorAll) {
-                                // Only process a few elements at a time
                                 const elements = node.querySelectorAll('a[href], img[src], link[href], script[src]');
                                 for (const el of elements) {
                                     const attr = el.hasAttribute('href') ? 'href' : 'src';
@@ -331,7 +354,7 @@ const REWRITER = `(function() {
     }
     
     // ==========================================
-    // CLEANUP - Prevent memory leaks
+    // CLEANUP
     // ==========================================
     setInterval(() => {
         if (urlCache.size > CACHE_LIMIT) {
@@ -397,7 +420,7 @@ self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
 // ==========================================
-// FETCH HANDLER
+// FETCH HANDLER - FIXED
 // ==========================================
 self.addEventListener('fetch', (event) => {
     const reqUrl = new URL(event.request.url);
@@ -462,26 +485,37 @@ self.addEventListener('fetch', (event) => {
                 headers: headers,
                 redirect: 'follow',
                 mode: 'cors',
-                timeout: 20000
+                credentials: 'omit'
             };
             
+            // Handle body with proper duplex
             if (!['GET', 'HEAD'].includes(event.request.method)) {
                 try {
-                    options.body = await event.request.text();
+                    const body = await event.request.text();
+                    if (body) {
+                        options.body = body;
+                        // Add duplex for streaming bodies
+                        options.duplex = 'half';
+                    }
                 } catch(e) {
-                    options.body = event.request.body;
+                    // If we can't read the body, try to stream it
+                    if (event.request.body) {
+                        options.body = event.request.body;
+                        options.duplex = 'half';
+                    }
                 }
             }
             
             try {
                 const response = await Promise.race([
                     libcurl.fetch(targetUrl.href, options),
-                    new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 20000))
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 30000))
                 ]);
                 
                 const ct = response.headers.get('content-type') || '';
                 const isHtml = ct.includes('text/html');
                 const isCss = ct.includes('text/css');
+                const isJs = ct.includes('javascript') || ct.includes('text/javascript');
                 
                 const respHeaders = new Headers(response.headers);
                 const block = ['content-security-policy', 'x-frame-options', 
@@ -490,6 +524,9 @@ self.addEventListener('fetch', (event) => {
                 
                 respHeaders.set('Access-Control-Allow-Origin', '*');
                 respHeaders.set('Access-Control-Allow-Credentials', 'true');
+                respHeaders.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD');
+                respHeaders.set('Access-Control-Allow-Headers', '*');
+                respHeaders.set('Access-Control-Expose-Headers', '*');
                 
                 if (respHeaders.has('location')) {
                     try {
@@ -498,12 +535,12 @@ self.addEventListener('fetch', (event) => {
                     } catch(e) {}
                 }
                 
+                // Don't rewrite JS files - client rewriter handles them
                 if (isHtml || isCss) {
                     let text = await response.text();
                     text = fastProxyText(text, targetUrl.origin);
                     
                     if (isHtml) {
-                        // Only inject if not already injected
                         if (!text.includes('/rewriter.js')) {
                             const injector = `<script src="/rewriter.js"><\/script>`;
                             if (text.includes('<head>')) {
@@ -528,7 +565,8 @@ self.addEventListener('fetch', (event) => {
                 });
                 
             } catch(err) {
-                return new Response(generateErrorPage(err.message), { 
+                console.error('[sw] Proxy error:', err);
+                return new Response(generateErrorPage(err.message || 'Proxy error'), { 
                     status: 502, 
                     headers: { 'Content-Type': 'text/html' } 
                 });
@@ -545,25 +583,28 @@ self.addEventListener('fetch', (event) => {
             headers: event.request.headers,
             redirect: 'follow',
             mode: 'cors',
-            timeout: 20000
+            credentials: 'omit'
         };
-        if (!['GET', 'HEAD'].includes(event.request.method)) {
+        if (!['GET', 'HEAD'].includes(event.request.method) && event.request.body) {
             opts.body = event.request.body;
+            opts.duplex = 'half';
         }
         event.respondWith(
-            fetch(proxied, opts).catch(() => 
-                new Response(generateErrorPage('Failed to proxy request'), { 
+            fetch(proxied, opts).catch(err => {
+                console.error('[sw] External fetch error:', err);
+                return new Response(generateErrorPage('Failed to proxy request'), { 
                     status: 502, 
                     headers: { 'Content-Type': 'text/html' } 
-                })
-            )
+                });
+            })
         );
         return;
     }
     
-    // --- Static assets from proxied pages ---
-    const skip = new Set(['/index.html', '/rewriter.js', '/favicon.ico']);
+    // --- Handle 404s and static assets from proxied pages ---
+    const skip = new Set(['/index.html', '/rewriter.js', '/favicon.ico', '/robots.txt']);
     if (!pathname.startsWith(PROXY_PREFIX) && !skip.has(pathname)) {
+        // For paths like /xjs/ or other Google assets, try to find the context
         event.respondWith(
             self.clients.matchAll({ type: 'window' }).then(clients => {
                 let contextUrl = null;
@@ -580,8 +621,12 @@ self.addEventListener('fetch', (event) => {
                         const targetOrigin = new URL(decodeURIComponent(
                             clientPath.substring(PROXY_PREFIX.length)
                         )).origin;
+                        
+                        // Build the full target URL
+                        let targetPath = pathname + reqUrl.search;
+                        // Handle paths that start with /xjs/ etc.
                         const corrected = `${self.location.origin}${PROXY_PREFIX}${encodeURIComponent(
-                            targetOrigin + pathname + reqUrl.search
+                            targetOrigin + targetPath
                         )}`;
                         
                         if (event.request.mode === 'navigate') {
@@ -592,15 +637,26 @@ self.addEventListener('fetch', (event) => {
                             method: event.request.method,
                             headers: event.request.headers,
                             mode: 'cors',
-                            timeout: 20000
+                            credentials: 'omit'
                         };
-                        if (!['GET', 'HEAD'].includes(event.request.method)) {
+                        if (!['GET', 'HEAD'].includes(event.request.method) && event.request.body) {
                             opts.body = event.request.body;
+                            opts.duplex = 'half';
                         }
                         return fetch(corrected, opts);
-                    } catch(e) {}
+                    } catch(e) {
+                        console.error('[sw] Asset routing error:', e);
+                    }
                 }
+                
+                // If no context, try to serve the asset directly
                 return fetch(event.request);
+            }).catch(err => {
+                console.error('[sw] Client matching error:', err);
+                return new Response(generateErrorPage('Failed to load asset'), { 
+                    status: 404, 
+                    headers: { 'Content-Type': 'text/html' } 
+                });
             })
         );
     }
