@@ -1,5 +1,5 @@
 // ==========================================
-// fastsw service worker - v2.0.0 (ULTIMATE)
+// fastsw v2, powerful proxy with rewritting and service workers
 // ==========================================
 const PROXY_PREFIX = '/go/';
 const WISP_SERVER_URL = 'wss://wisp.mercurywork.shop/wisp/';
