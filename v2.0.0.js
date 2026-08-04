@@ -1,5 +1,5 @@
 // ==========================================
-// fastsw service worker - v2.0.0
+// fastsw service worker - v2.0.0 (Enhanced)
 // ==========================================
 const PROXY_PREFIX = '/go/';
 const WISP_SERVER_URL = 'wss://wisp.mercurywork.shop/wisp/';
@@ -149,21 +149,45 @@ const REWRITER = `(function() {
         return result;
     }
 
-    // --- fetch ---
+    // --- fetch (Enhanced to handle all methods properly) ---
     const _fetch = window.fetch;
     window.fetch = async function(input, init) {
+        let modifiedInput = input;
         if (typeof input === 'string') {
-            input = cachedRewriteUrl(input);
+            modifiedInput = cachedRewriteUrl(input);
         } else if (input instanceof Request) {
-            input = new Request(cachedRewriteUrl(input.url), input);
+            // Preserve all request properties when modifying
+            const newUrl = cachedRewriteUrl(input.url);
+            const newInit = {
+                method: input.method,
+                headers: input.headers,
+                body: input.body,
+                mode: input.mode,
+                credentials: input.credentials,
+                cache: input.cache,
+                redirect: input.redirect,
+                referrer: input.referrer,
+                referrerPolicy: input.referrerPolicy,
+                integrity: input.integrity,
+                keepalive: input.keepalive,
+                signal: input.signal
+            };
+            modifiedInput = new Request(newUrl, newInit);
         }
-        return _fetch.call(this, input, init);
+        return _fetch.call(this, modifiedInput, init);
     };
 
-    // --- XMLHttpRequest ---
+    // --- XMLHttpRequest (Enhanced) ---
     const _xhrOpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function(method, url, ...args) {
         return _xhrOpen.call(this, method, cachedRewriteUrl(url), ...args);
+    };
+
+    // --- XMLHttpRequest send (handle body properly) ---
+    const _xhrSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function(body) {
+        // If body is a FormData, URLSearchParams, etc., it will be sent as-is
+        return _xhrSend.call(this, body);
     };
 
     // --- navigator.sendBeacon ---
@@ -432,15 +456,32 @@ const REWRITER = `(function() {
     };
 
     // ==========================================
-    // SANDBOX ESCAPE PREVENTION
+    // SANDBOX ESCAPE PREVENTION (Enhanced)
     // ==========================================
     try {
+        // Block all ways to access parent/top/opener
         Object.defineProperty(window, 'top',         { get: () => window,    configurable: true });
         Object.defineProperty(window, 'parent',      { get: () => window,    configurable: true });
         Object.defineProperty(window, 'self',        { get: () => window,    configurable: true });
         Object.defineProperty(window, 'frameElement',{ get: () => null,      configurable: true });
         Object.defineProperty(window, 'frames',      { get: () => window,    configurable: true });
         Object.defineProperty(window, 'length',      { get: () => 0,         configurable: true });
+        Object.defineProperty(window, 'opener',      { get: () => null,      configurable: true });
+        Object.defineProperty(window, 'parent',      { get: () => window,    configurable: true });
+        
+        // Block window.name as it can be used for cross-window communication
+        Object.defineProperty(window, 'name',        { get: () => '',        set: () => {}, configurable: true });
+        
+        // Block postMessage to prevent detection
+        const _postMessage = window.postMessage;
+        window.postMessage = function(message, targetOrigin, transfer) {
+            // Only allow messages to our own origin or to "*" with our origin
+            if (targetOrigin === '*' || targetOrigin === PROXY_ORIGIN) {
+                return _postMessage.call(this, message, targetOrigin, transfer);
+            }
+            // Block cross-origin messages to prevent detection
+            return;
+        };
     } catch(e) {}
 
     // ==========================================
@@ -467,7 +508,7 @@ const REWRITER = `(function() {
         if (!html.includes('=') && !html.includes('url(')) return html;
         
         return html
-            .replace(/(href|src|action|data|poster|srcset)=(['"])([^'"]+)\\2/gi, (m, attr, q, val) => {
+            .replace(/(href|src|action|data|poster|srcset|codebase|longdesc|usemap|cite|profile|archive|code|declare|standby|background)=(['"])([^'"]+)\\2/gi, (m, attr, q, val) => {
                 const rewritten = attr.toLowerCase() === 'srcset' ? rewriteSrcset(val) : cachedRewriteUrl(val);
                 return \`\${attr}=\${q}\${rewritten}\${q}\`;
             })
@@ -484,7 +525,7 @@ const REWRITER = `(function() {
     };
 
     // ==========================================
-    // ELEMENT CREATION & ATTRIBUTE OVERRIDES
+    // ELEMENT CREATION & ATTRIBUTE OVERRIDES (Enhanced)
     // ==========================================
 
     const protoPatches = [
@@ -505,6 +546,10 @@ const REWRITER = `(function() {
         [HTMLObjectElement,    'data'],
         [HTMLFormElement,      'action'],
         [HTMLInputElement,     'src'],
+        [HTMLFrameElement,     'src'],
+        [HTMLFrameElement,     'longdesc'],
+        [HTMLIFrameElement,    'longdesc'],
+        [HTMLIFrameElement,    'src'],
     ];
 
     for (const [Ctor, prop] of protoPatches) {
@@ -535,13 +580,16 @@ const REWRITER = `(function() {
         }
     } catch(e) {}
 
-    // --- HTMLFormElement submit ---
+    // --- HTMLFormElement submit (Enhanced) ---
     function rewriteFormAction(form) {
         if (!form) return;
         let action = form.getAttribute('action') || (simulatedTarget ? simulatedTarget.href : window.location.href);
         if (action && !action.startsWith(PROXY_PREFIX)) {
             form.setAttribute('action', cachedRewriteUrl(action));
         }
+        // Also rewrite method if needed (but preserve original)
+        const method = form.getAttribute('method') || 'GET';
+        // We don't change method, just ensure action is proxied
     }
     const _formSubmit = HTMLFormElement.prototype.submit;
     HTMLFormElement.prototype.submit = function() { 
@@ -558,7 +606,7 @@ const REWRITER = `(function() {
     const _setAttribute = Element.prototype.setAttribute;
     Element.prototype.setAttribute = function(name, value) {
         const n = name.toLowerCase();
-        if (n === 'href' || n === 'src' || n === 'action' || n === 'data' || n === 'poster') {
+        if (n === 'href' || n === 'src' || n === 'action' || n === 'data' || n === 'poster' || n === 'longdesc' || n === 'codebase' || n === 'cite' || n === 'profile') {
             value = cachedRewriteUrl(value);
         } else if (n === 'srcset') {
             value = rewriteSrcset(value);
@@ -566,6 +614,9 @@ const REWRITER = `(function() {
             value = rewriteCssText(value);
         } else if (n === 'content' && this.tagName === 'META') {
             value = value.replace(/(;\\s*url=)(.+)/i, (m, prefix, url) => prefix + cachedRewriteUrl(url.trim()));
+        } else if (n === 'integrity' || n === 'crossorigin' || n === 'referrerpolicy') {
+            // Remove integrity and other security headers that might break proxying
+            return;
         }
         return _setAttribute.call(this, name, value);
     };
@@ -601,12 +652,16 @@ const REWRITER = `(function() {
     } catch(e) {}
 
     // ==========================================
-    // CSS STYLE REWRITING
+    // CSS STYLE REWRITING (Enhanced)
     // ==========================================
     const CSS_URL_PROPS = [
         'backgroundImage', 'background', 'borderImage', 'borderImageSource',
         'listStyleImage', 'maskImage', 'mask', 'cursor', 'content',
-        'webkitMaskImage', 'webkitMask',
+        'webkitMaskImage', 'webkitMask', 'src', 'srcset', 'behavior',
+        'background', 'background-image', 'list-style-image',
+        'border-image', 'border-image-source', 'mask-image', 'mask',
+        'cursor', 'content', 'overflow', 'scrollbar-base-color',
+        'scrollbar-arrow-color', 'scrollbar-track-color', 'scrollbar-face-color'
     ];
 
     try {
@@ -645,12 +700,29 @@ const REWRITER = `(function() {
     } catch(e) {}
 
     // ==========================================
-    // PERFORMANCE API
+    // PERFORMANCE API (Enhanced)
     // ==========================================
     try {
         const _getEntries = Performance.prototype.getEntries;
         const _getEntriesByType = Performance.prototype.getEntriesByType;
         const _getEntriesByName = Performance.prototype.getEntriesByName;
+        
+        // Also override the performance object itself to hide proxy traces
+        const origPerformance = window.performance;
+        if (origPerformance) {
+            // Override navigation to hide proxy
+            if (origPerformance.navigation) {
+                Object.defineProperty(origPerformance, 'navigation', {
+                    get: function() {
+                        return {
+                            type: 0, // TYPE_NAVIGATE
+                            redirectCount: 0
+                        };
+                    },
+                    configurable: true
+                });
+            }
+        }
         
         if (_getEntries) {
             Performance.prototype.getEntries = function(...a) {
@@ -699,7 +771,7 @@ const REWRITER = `(function() {
     // ==========================================
     // MUTATION OBSERVER - optimized
     // ==========================================
-    const URL_ATTR_SET = new Set(['href', 'src', 'action', 'data', 'poster', 'srcset', 'navigation-url']);
+    const URL_ATTR_SET = new Set(['href', 'src', 'action', 'data', 'poster', 'srcset', 'navigation-url', 'longdesc', 'codebase', 'cite', 'profile', 'archive', 'code', 'declare', 'standby', 'background']);
     let observerActive = false;
     let observerTimeout = null;
 
@@ -816,6 +888,36 @@ const REWRITER = `(function() {
         } catch(e) {}
     }
 
+    // ==========================================
+    // ADDITIONAL DETECTION PREVENTION
+    // ==========================================
+    try {
+        // Prevent detection of proxy via checking referrer, origin, etc.
+        Object.defineProperty(document, 'referrer', {
+            get: function() { return simulatedTarget ? simulatedTarget.origin + '/' : ''; },
+            configurable: true
+        });
+        
+        // Override navigator properties that might reveal proxy
+        const origNavigator = window.navigator;
+        Object.defineProperty(window, 'navigator', {
+            get: function() {
+                const nav = Object.create(origNavigator);
+                // Hide any proxy-related properties
+                ['connection', 'deviceMemory', 'hardwareConcurrency'].forEach(prop => {
+                    if (prop in nav) {
+                        Object.defineProperty(nav, prop, {
+                            get: function() { return undefined; },
+                            configurable: true
+                        });
+                    }
+                });
+                return nav;
+            },
+            configurable: true
+        });
+    } catch(e) {}
+
     // Clear cache periodically to prevent memory leaks
     setInterval(() => {
         if (urlCache.size > CACHE_SIZE_LIMIT / 2) {
@@ -842,7 +944,7 @@ function generateErrorPage(errorMessage, status) {
 // Pre-compiled regex patterns for performance
 const HTML_ENTITY_PATTERN = /%252F|%253F|%253D|%2526|&quot;|&amp;|&lt;|&gt;/gi;
 const URL_PROTOCOL_PATTERN = /https?:\/\/[a-zA-Z0-9\-._~:/?#[\]@!$&()*+,;=%]+/g;
-const ATTR_PATTERN = /\b(href|src|action|data|poster|srcset)=(["'])([^"']+)\2/gi;
+const ATTR_PATTERN = /\b(href|src|action|data|poster|srcset|longdesc|codebase|cite|profile|archive|code|declare|standby|background)=(["'])([^"']+)\2/gi;
 const CSS_URL_PATTERN = /\burl\(\s*(["']?)(?!data:|blob:|#)([^)'"]+?)\1\s*\)/gi;
 const INTEGRITY_PATTERN = /integrity=["'][^"']*["']\s*/gi;
 const CROSSORIGIN_PATTERN = /crossorigin=["'][^"']*["']\s*/gi;
@@ -916,7 +1018,7 @@ self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
 // ==========================================
-// FETCH HANDLER - optimized
+// FETCH HANDLER - Enhanced
 // ==========================================
 self.addEventListener('fetch', (event) => {
     const reqUrl = new URL(event.request.url);
@@ -976,10 +1078,19 @@ self.addEventListener('fetch', (event) => {
             }
 
             const modHeaders = new Headers(event.request.headers);
+            // Remove headers that might reveal proxy or cause issues
             modHeaders.delete('accept-encoding');
+            modHeaders.delete('if-none-match');
+            modHeaders.delete('if-match');
+            modHeaders.delete('if-modified-since');
+            modHeaders.delete('if-unmodified-since');
+            modHeaders.delete('if-range');
             modHeaders.set('X-Proxy-Loop-Guard', 'true');
             modHeaders.set('Origin', targetUrl.origin);
             modHeaders.set('Referer', targetUrl.origin + '/');
+            
+            // Preserve all other headers for POST/PUT/PATCH requests
+            // This includes Content-Type, Content-Length, etc.
 
             let mode = event.request.mode;
             if (mode === 'same-origin' || mode === 'navigate') mode = 'cors';
@@ -993,9 +1104,24 @@ self.addEventListener('fetch', (event) => {
                 timeout: 30000 // 30 second timeout
             };
             
+            // Handle request body for all non-GET/HEAD methods
             if (!['GET', 'HEAD'].includes(event.request.method)) {
-                fetchOpts.body = event.request.body;
-                if (event.request.body) fetchOpts.duplex = 'half';
+                try {
+                    // Try to clone and read the body
+                    const clonedRequest = event.request.clone();
+                    const body = await clonedRequest.text();
+                    fetchOpts.body = body;
+                    
+                    // Ensure Content-Type is preserved
+                    if (modHeaders.has('content-type')) {
+                        // Already set from original headers
+                    } else if (event.request.headers.has('content-type')) {
+                        modHeaders.set('content-type', event.request.headers.get('content-type'));
+                    }
+                } catch(e) {
+                    // If we can't read the body, try to pass it through
+                    fetchOpts.body = event.request.body;
+                }
             }
 
             try {
@@ -1013,12 +1139,18 @@ self.addEventListener('fetch', (event) => {
                     'x-frame-options', 'cross-origin-opener-policy',
                     'cross-origin-embedder-policy', 'cross-origin-resource-policy',
                     'strict-transport-security', 'x-content-type-options',
-                    'integrity', 'content-encoding'
+                    'integrity', 'content-encoding', 'content-length',
+                    'set-cookie', 'set-cookie2', 'x-powered-by',
+                    'x-aspnet-version', 'x-aspnetmvc-version'
                 ];
                 for (const h of blockHeaders) respHeaders.delete(h);
 
+                // Add CORS headers to allow the client to access resources
                 respHeaders.set('Access-Control-Allow-Origin', '*');
                 respHeaders.set('Access-Control-Allow-Credentials', 'true');
+                respHeaders.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD');
+                respHeaders.set('Access-Control-Allow-Headers', '*');
+                respHeaders.set('Access-Control-Expose-Headers', '*');
 
                 // Rewrite redirect Location
                 if (respHeaders.has('location')) {
@@ -1031,10 +1163,14 @@ self.addEventListener('fetch', (event) => {
                 const isHtml = ct.includes('text/html');
                 const isJs = ct.includes('javascript') || ct.includes('text/javascript') || ct.includes('x-javascript');
                 const isCss = ct.includes('text/css');
+                const isJson = ct.includes('application/json');
 
-                if (isHtml || isJs || isCss) {
+                if (isHtml || isJs || isCss || isJson) {
                     let text = await response.text();
-                    text = proxyTextContent(text, targetUrl.origin, isJs);
+                    
+                    if (!isJson) {
+                        text = proxyTextContent(text, targetUrl.origin, isJs);
+                    }
 
                     if (isHtml) {
                         const injector = `<script src="/libcurl.js"><\/script><script src="/rewriter.js"><\/script>`;
@@ -1044,6 +1180,18 @@ self.addEventListener('fetch', (event) => {
                             text = text.replace(/<html([^>]*)>/i, `<html$1>${injector}`);
                         } else {
                             text = injector + text;
+                        }
+                        
+                        // Remove any meta refresh tags that might break proxying
+                        text = text.replace(/<meta[^>]*http-equiv=["']refresh["'][^>]*>/gi, '');
+                    }
+
+                    // For JSON, ensure it's properly formatted
+                    if (isJson && typeof text === 'string') {
+                        try {
+                            JSON.parse(text); // Validate JSON
+                        } catch(e) {
+                            // If invalid JSON, return as is
                         }
                     }
 
@@ -1083,7 +1231,6 @@ self.addEventListener('fetch', (event) => {
         };
         if (!['GET', 'HEAD'].includes(event.request.method)) {
             opts.body = event.request.body;
-            if (event.request.body) opts.duplex = 'half';
         }
         event.respondWith(
             fetch(proxied, opts).catch(err =>
@@ -1133,7 +1280,6 @@ self.addEventListener('fetch', (event) => {
                         };
                         if (!['GET', 'HEAD'].includes(event.request.method)) {
                             opts.body = event.request.body;
-                            if (event.request.body) opts.duplex = 'half';
                         }
                         return fetch(corrected, opts);
                     } catch(e) {}
