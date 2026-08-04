@@ -66,7 +66,7 @@ const REWRITER = `(function() {
         if (!srcset || typeof srcset !== 'string') return srcset;
         return srcset.split(',').map(part => {
             const trimmed = part.trim();
-            const spaceIdx = trimmed.search(/\s/);
+            const spaceIdx = trimmed.search(/\\s/);
             if (spaceIdx === -1) return rewriteUrl(trimmed);
             const urlPart = trimmed.slice(0, spaceIdx);
             const rest = trimmed.slice(spaceIdx);
@@ -77,7 +77,7 @@ const REWRITER = `(function() {
     // rewrite URLs inside CSS text (background-image: url(...), etc.)
     function rewriteCssText(css) {
         if (!css) return css;
-        return css.replace(/url\(\s*(['"]?)([^)'"]+)\\1\s*\)/gi, (match, quote, urlVal) => {
+        return css.replace(/url\\(\\s*(['"]?)([^)'"]+)\\1\\s*\\)/gi, (match, quote, urlVal) => {
             const rewritten = rewriteUrl(urlVal.trim());
             return \`url(\${quote}\${rewritten}\${quote})\`;
         });
@@ -380,7 +380,7 @@ const REWRITER = `(function() {
                 const rewritten = attr.toLowerCase() === 'srcset' ? rewriteSrcset(val) : rewriteUrl(val);
                 return \`\${attr}=\${q}\${rewritten}\${q}\`;
             })
-            .replace(/url\(\s*(['"]?)([^)'"]+)\\1\s*\)/gi, (m, q, val) => \`url(\${q}\${rewriteUrl(val.trim())}\${q})\`);
+            .replace(/url\\(\\s*(['"]?)([^)'"]+)\\1\\s*\\)/gi, (m, q, val) => \`url(\${q}\${rewriteUrl(val.trim())}\${q})\`);
     }
 
     // ==========================================
@@ -457,7 +457,7 @@ const REWRITER = `(function() {
         else if (n === 'style') value = rewriteCssText(value);
         // meta http-equiv refresh with URL
         else if (n === 'content' && this.tagName === 'META') {
-            value = value.replace(/(;\s*url=)(.+)/i, (m, prefix, url) => prefix + rewriteUrl(url.trim()));
+            value = value.replace(/(;\\s*url=)(.+)/i, (m, prefix, url) => prefix + rewriteUrl(url.trim()));
         }
         return _setAttribute.call(this, name, value);
     };
@@ -684,16 +684,28 @@ function proxyTextContent(text, targetOrigin, isJs) {
     // a closing quote character from a JS string literal, causing "missing ) after argument list".
     if (isJs) return text;
 
+    // First, clean up any HTML entities that might have been double-encoded
+    // Fix common issues: %252F -> %2F, &quot; -> ", etc.
+    let cleaned = text
+        .replace(/%252F/g, '%2F')
+        .replace(/%253F/g, '%3F')
+        .replace(/%253D/g, '%3D')
+        .replace(/%2526/g, '%26')
+        .replace(/&quot;/g, '"')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>');
+
     // Rewrite absolute URLs in HTML/CSS.
     // Note: ' is intentionally excluded from the character class to avoid consuming
     // string delimiters when a URL appears inside a quoted context.
-    let out = text.replace(/(https?:\/\/[a-zA-Z0-9\-._~:/?#[\]@!$&()*+,;=%]+)/g, (match) => {
+    let out = cleaned.replace(/(https?:\/\/[a-zA-Z0-9\-._~:/?#[\]@!$&()*+,;=%]+)/g, (match) => {
         if (match.includes(PROXY_PREFIX) || match.startsWith(self.location.origin)) return match;
         return `${self.location.origin}${PROXY_PREFIX}${encodeURIComponent(match)}`;
     });
 
     // Rewrite relative href/src/action/data/poster attributes (HTML)
-    const attrPattern = /\b(href|src|action|data|poster|srcset)=(["'])([^"']+)\2/gi;
+    const attrPattern = /\\b(href|src|action|data|poster|srcset)=(["'])([^"']+)\\2/gi;
     out = out.replace(attrPattern, (match, attr, q, val) => {
         if (val.startsWith('#') || val.startsWith('javascript:') || val.startsWith('data:') || val.includes(PROXY_PREFIX)) return match;
         try {
@@ -703,7 +715,7 @@ function proxyTextContent(text, targetOrigin, isJs) {
     });
 
     // Rewrite relative url(...) references in CSS (e.g. Google Fonts: url(font.woff2))
-    out = out.replace(/\burl\(\s*(["']?)(?!data:|blob:|#)([^)'"]+?)\1\s*\)/gi, (match, q, val) => {
+    out = out.replace(/\\burl\\(\\s*(["']?)(?!data:|blob:|#)([^)'"]+?)\\1\\s*\\)/gi, (match, q, val) => {
         val = val.trim();
         if (!val || val.includes(PROXY_PREFIX)) return match;
         try {
@@ -711,6 +723,22 @@ function proxyTextContent(text, targetOrigin, isJs) {
             return `url(${q}${self.location.origin}${PROXY_PREFIX}${encodeURIComponent(resolved)}${q})`;
         } catch(e) { return match; }
     });
+
+    // STRIP INTEGRITY ATTRIBUTES - This fixes SRI failures
+    // Remove integrity attributes from link and script tags
+    out = out.replace(/<link([^>]*)integrity=["'][^"']*["']([^>]*)>/gi, (match, before, after) => {
+        return `<link${before}${after}>`;
+    });
+    out = out.replace(/<script([^>]*)integrity=["'][^"']*["']([^>]*)>/gi, (match, before, after) => {
+        return `<script${before}${after}>`;
+    });
+    // Also handle integrity as a standalone attribute (some sites might have it differently)
+    out = out.replace(/\\bintegrity=["'][^"']*["']\\s*/gi, '');
+
+    // Strip crossorigin attributes that might cause issues
+    out = out.replace(/crossorigin=["'][^"']*["']\\s*/gi, '');
+    // Strip referrerpolicy that might interfere
+    out = out.replace(/referrerpolicy=["'][^"']*["']\\s*/gi, '');
 
     return out;
 }
@@ -743,6 +771,8 @@ self.addEventListener('fetch', (event) => {
                     const headers = new Headers(r.headers);
                     headers.set('Cache-Control', 'public, max-age=3600');
                     headers.set('Cross-Origin-Resource-Policy', 'cross-origin');
+                    // Strip integrity from libcurl.js too
+                    headers.delete('Integrity');
                     return new Response(r.body, { status: r.status, headers });
                 })
                 .catch(() => new Response('', { status: 503 }))
@@ -762,8 +792,20 @@ self.addEventListener('fetch', (event) => {
             while (!libcurlReady) await new Promise(r => setTimeout(r, 50));
 
             let targetUrl;
-            try { targetUrl = new URL(decodeURIComponent(encodedTarget)); }
-            catch(e) { return new Response(generateErrorPage('Invalid target URL: ' + e.message, 400), { status: 400, headers: { 'Content-Type': 'text/html' } }); }
+            try { 
+                // Fix double-encoded URLs
+                let decoded = decodeURIComponent(encodedTarget);
+                // Clean up any HTML entities that might be in the URL
+                decoded = decoded.replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+                // Handle cases where URLs have %252F (double-encoded)
+                if (decoded.includes('%252F')) {
+                    decoded = decoded.replace(/%252F/g, '%2F');
+                }
+                targetUrl = new URL(decoded);
+            }
+            catch(e) { 
+                return new Response(generateErrorPage('Invalid target URL: ' + e.message, 400), { status: 400, headers: { 'Content-Type': 'text/html' } }); 
+            }
 
             const modHeaders = new Headers(event.request.headers);
             modHeaders.delete('accept-encoding');
@@ -792,6 +834,7 @@ self.addEventListener('fetch', (event) => {
                     'x-frame-options', 'cross-origin-opener-policy',
                     'cross-origin-embedder-policy', 'cross-origin-resource-policy',
                     'strict-transport-security', 'x-content-type-options',
+                    'integrity', // Remove integrity header entirely
                 ]) respHeaders.delete(h);
 
                 respHeaders.set('Access-Control-Allow-Origin', '*');
@@ -817,14 +860,27 @@ self.addEventListener('fetch', (event) => {
                     if (isHtml) {
                         // inject libcurl.js first so CurlWebSocket is available to the rewriter
                         const injector = `<script src="/libcurl.js"><\/script><script src="/rewriter.js"><\/script>`;
-                        if (/<head[\s>]/i.test(text)) text = text.replace(/<head([^>]*)>/i, `<head$1>${injector}`);
-                        else if (/<html[\s>]/i.test(text)) text = text.replace(/<html([^>]*)>/i, `<html$1>${injector}`);
+                        if (/<head[\\s>]/i.test(text)) text = text.replace(/<head([^>]*)>/i, `<head$1>${injector}`);
+                        else if (/<html[\\s>]/i.test(text)) text = text.replace(/<html([^>]*)>/i, `<html$1>${injector}`);
                         else text = injector + text;
                     }
+
+                    // If it's CSS, also strip any @import rules with integrity or that might fail
+                    if (isCss) {
+                        // Remove any @import url(...) that might fail
+                        text = text.replace(/@import\\s+url\\([^)]*\\)\\s*;?/gi, '');
+                        // Remove any charset declarations that might cause issues
+                        text = text.replace(/@charset\\s+["'][^"']*["']\\s*;?/gi, '');
+                    }
+
+                    // Remove any integrity headers from the response
+                    respHeaders.delete('Integrity');
 
                     return new Response(text, { status: response.status, statusText: response.statusText, headers: respHeaders });
                 }
 
+                // For non-text responses, also strip integrity
+                respHeaders.delete('Integrity');
                 return new Response(response.body, { status: response.status, statusText: response.statusText, headers: respHeaders });
             } catch(err) {
                 return new Response(generateErrorPage(err.message, 502), { status: 502, headers: { 'Content-Type': 'text/html' } });
