@@ -1,5 +1,5 @@
 // ==========================================
-// ULTIMATE PROXY WITH XOR ENCODING, WEBSOCKET, & COOKIE JAR
+// idk why ur here but do something ig with it
 // ==========================================
 const PROXY_PREFIX = '/go/';
 const WISP_SERVER_URL = 'wss://wisp.mercurywork.shop/wisp/'; 
