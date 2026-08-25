@@ -1,16 +1,11 @@
-// ==========================================
-// idk why ur here but do something ig with it
-// ==========================================
 const PROXY_PREFIX = '/go/';
-const WISP_SERVER_URL = 'wss://wisp.mercurywork.shop/wisp/'; 
+const WISP_SERVER_URL = 'wss://wisp.mercurywork.shop/wisp/';
 
-// XOR Encryption Keys
 const XOR_KEY1 = 0x5A;
 const XOR_KEY2 = 0x3C;
 const XOR_KEY3 = 0xF1;
 const XOR_KEYS = [XOR_KEY1, XOR_KEY2, XOR_KEY3];
 
-// CDN parts for libcurl
 const cndPart1 = 'https://cdn.';
 const cndPart2 = 'jsdelivr.net/';
 const cndPart3 = 'npm/libcurl.js';
@@ -21,32 +16,41 @@ const libcurlUrl = cndPart1 + cndPart2 + cndPart3 + cndPart4 + cndPart5;
 
 try {
     importScripts(libcurlUrl);
-} catch (e) {
-    console.error("[sw-helper] Failed to load libcurl.js dependency.", e);
-}
+} catch (e) {}
 
 let libcurlReady = false;
+let libcurlLoadAttempts = 0;
+const MAX_LIBCURL_ATTEMPTS = 10;
 
-if (typeof libcurl !== 'undefined') {
-    if (typeof libcurl.set_websocket === 'function') {
-        libcurl.set_websocket(WISP_SERVER_URL);
-    }
-    
-    if (libcurl.ready) {
-        libcurlReady = true;
-    } else {
-        libcurl.onload = () => {
-            console.log("[sw-helper] libcurl WebAssembly components initialized successfully.");
+function checkLibcurlReady() {
+    if (typeof libcurl !== 'undefined') {
+        if (typeof libcurl.set_websocket === 'function') {
+            libcurl.set_websocket(WISP_SERVER_URL);
+        }
+        
+        if (libcurl.ready) {
             libcurlReady = true;
-        };
+        } else {
+            libcurl.onload = () => {
+                libcurlReady = true;
+            };
+        }
+        return true;
     }
-} else {
-    console.warn("[sw-helper] libcurl library is not globally accessible yet.");
+    return false;
 }
 
-// ==========================================
-// XOR ENCODING/DECODING UTILITIES
-// ==========================================
+checkLibcurlReady();
+
+if (!libcurlReady) {
+    const checkInterval = setInterval(() => {
+        libcurlLoadAttempts++;
+        if (checkLibcurlReady() || libcurlLoadAttempts >= MAX_LIBCURL_ATTEMPTS) {
+            clearInterval(checkInterval);
+        }
+    }, 500);
+}
+
 class XORCoder {
     constructor() {
         this.keys = XOR_KEYS;
@@ -80,28 +84,36 @@ class XORCoder {
         }
     }
 
-    encodeURL(url) {
-        if (!url) return url;
-        return this.encode(url);
-    }
-
-    decodeURL(encoded) {
+    safeDecode(encoded) {
         if (!encoded) return encoded;
-        return this.decode(encoded);
+        try {
+            const decoded = this.decode(encoded);
+            if (decoded && (decoded.startsWith('http://') || decoded.startsWith('https://') || 
+                           decoded.startsWith('ws://') || decoded.startsWith('wss://') ||
+                           decoded.startsWith('//') || decoded.includes('.'))) {
+                return decoded;
+            }
+            try {
+                const uriDecoded = decodeURIComponent(encoded);
+                if (uriDecoded && (uriDecoded.startsWith('http://') || uriDecoded.startsWith('https://') ||
+                                  uriDecoded.startsWith('ws://') || uriDecoded.startsWith('wss://') ||
+                                  uriDecoded.startsWith('//') || uriDecoded.includes('.'))) {
+                    return uriDecoded;
+                }
+            } catch(e) {}
+            return encoded;
+        } catch(e) {
+            return encoded;
+        }
     }
 }
 
 const xorCoder = new XORCoder();
 
-// ==========================================
-// ADVANCED COOKIE JAR WITH DOMAIN ISOLATION
-// ==========================================
 class CookieJar {
     constructor() {
         this.cookieStore = new Map();
         this.cookieMetadata = new Map();
-        this.domainContext = new Map();
-        this.sessionCookieStore = new Map();
     }
 
     getDomainKey(url) {
@@ -174,31 +186,6 @@ class CookieJar {
         }
         
         return cookies;
-    }
-
-    serializeCookies(cookies) {
-        return cookies.map(cookie => {
-            let str = `${cookie.name}=${cookie.value}`;
-            if (cookie.expires) {
-                str += `; Expires=${cookie.expires.toUTCString()}`;
-            }
-            if (cookie.domain) {
-                str += `; Domain=${cookie.domain}`;
-            }
-            if (cookie.path) {
-                str += `; Path=${cookie.path}`;
-            }
-            if (cookie.secure) {
-                str += `; Secure`;
-            }
-            if (cookie.httpOnly) {
-                str += `; HttpOnly`;
-            }
-            if (cookie.sameSite) {
-                str += `; SameSite=${cookie.sameSite}`;
-            }
-            return str;
-        }).join('; ');
     }
 
     setCookies(url, cookieString) {
@@ -281,101 +268,22 @@ class CookieJar {
         
         return cookiePairs.join('; ');
     }
-
-    getCookieObjects(url) {
-        const domain = this.getDomainKey(url);
-        if (!domain || !this.cookieStore.has(domain)) return [];
-        
-        const domainCookies = this.cookieStore.get(domain);
-        const domainMetadata = this.cookieMetadata.get(domain);
-        const cookies = [];
-        
-        for (const [name, value] of domainCookies) {
-            const metadata = domainMetadata.get(name) || {};
-            cookies.push({
-                name,
-                value,
-                ...metadata
-            });
-        }
-        
-        return cookies;
-    }
-
-    deleteCookie(url, name) {
-        const domain = this.getDomainKey(url);
-        if (!domain || !this.cookieStore.has(domain)) return;
-        
-        this.cookieStore.get(domain).delete(name);
-        this.cookieMetadata.get(domain).delete(name);
-    }
-
-    clearDomainCookies(url) {
-        const domain = this.getDomainKey(url);
-        if (!domain) return;
-        
-        this.cookieStore.delete(domain);
-        this.cookieMetadata.delete(domain);
-    }
-
-    clearAllCookies() {
-        this.cookieStore.clear();
-        this.cookieMetadata.clear();
-    }
-
-    getDomainContext(clientId) {
-        return this.domainContext.get(clientId) || null;
-    }
-
-    setDomainContext(clientId, domain) {
-        if (domain) {
-            this.domainContext.set(clientId, domain);
-        } else {
-            this.domainContext.delete(clientId);
-        }
-    }
-
-    hasCookie(url, name) {
-        const domain = this.getDomainKey(url);
-        if (!domain || !this.cookieStore.has(domain)) return false;
-        return this.cookieStore.get(domain).has(name);
-    }
-
-    getCookieValue(url, name) {
-        const domain = this.getDomainKey(url);
-        if (!domain || !this.cookieStore.has(domain)) return null;
-        return this.cookieStore.get(domain).get(name) || null;
-    }
-
-    getSessionCookies(sessionId) {
-        return this.sessionCookieStore.get(sessionId) || null;
-    }
-
-    setSessionCookies(sessionId, cookies) {
-        this.sessionCookieStore.set(sessionId, cookies);
-    }
 }
 
 const cookieJar = new CookieJar();
 
-// ==========================================
-// COMPLETE REWRITER WITH LIBCURL.JS INTEGRATION
-// ==========================================
 const REWRITER_SCRIPT = `(function() {
     'use strict';
     
     if (window.__rewriter_initialized) return;
     window.__rewriter_initialized = true;
-    window.__rewriter_version = '8.0.0-LIBCURL';
 
     const PROXY_PREFIX = '/go/';
     const PROXY_HOST = window.location.host;
     const PROXY_ORIGIN = window.location.origin;
 
-    // XOR Keys
     const XOR_KEYS = [0x5A, 0x3C, 0xF1];
 
-    // ----- XOR ENCODING -----
     function xorEncode(str) {
         if (!str) return str;
         try {
@@ -404,514 +312,302 @@ const REWRITER_SCRIPT = `(function() {
         }
     }
 
-    // ----- URL FUNCTIONS -----
-    const urlCache = new Map();
-    const MAX_CACHE_SIZE = 2000;
-
-    function rewriteUrl(url) {
-        if (!url || typeof url !== 'string') return url;
-        
-        if (urlCache.has(url)) {
-            return urlCache.get(url);
-        }
-        
-        const trimmed = url.trim();
-        if (trimmed.startsWith('data:') || trimmed.startsWith('blob:') || 
-            trimmed.startsWith('javascript:') || trimmed.startsWith('about:') ||
-            trimmed.startsWith('chrome-extension:') || trimmed.startsWith('file:') ||
-            trimmed.startsWith(PROXY_PREFIX) || trimmed.startsWith(PROXY_ORIGIN + PROXY_PREFIX) ||
-            trimmed.includes('/rewriter.js')) {
-            return url;
-        }
-        
+    function safeXorDecode(encoded) {
+        if (!encoded) return encoded;
         try {
-            const baseContext = window.location.href;
-            const resolved = new URL(trimmed, baseContext).href;
-            const encoded = xorEncode(resolved);
-            const result = PROXY_PREFIX + encoded;
-            
-            if (urlCache.size < MAX_CACHE_SIZE) {
-                urlCache.set(url, result);
+            const decoded = xorDecode(encoded);
+            if (decoded && (decoded.startsWith('http://') || decoded.startsWith('https://') || 
+                           decoded.startsWith('ws://') || decoded.startsWith('wss://') ||
+                           decoded.startsWith('//') || decoded.includes('.'))) {
+                return decoded;
             }
-            return result;
-        } catch (e) {
-            return url;
+            try {
+                const uriDecoded = decodeURIComponent(encoded);
+                if (uriDecoded && (uriDecoded.startsWith('http://') || uriDecoded.startsWith('https://') ||
+                                  uriDecoded.startsWith('ws://') || uriDecoded.startsWith('wss://') ||
+                                  uriDecoded.startsWith('//') || uriDecoded.includes('.'))) {
+                    return uriDecoded;
+                }
+            } catch(e) {}
+            return encoded;
+        } catch(e) {
+            return encoded;
         }
     }
 
-    function unproxyUrl(url) {
-        if (!url || typeof url !== 'string') return url;
-        if (url.includes(PROXY_PREFIX)) {
+    function getCurrentRemoteHref() {
+        if (window.location.pathname.substr(0, PROXY_PREFIX.length) === PROXY_PREFIX) {
+            return window.location.pathname.substr(PROXY_PREFIX.length) + 
+                   window.location.search + 
+                   window.location.hash;
+        }
+        return window.location.href;
+    }
+
+    function fixUrl(urlStr) {
+        if (!urlStr || typeof urlStr !== 'string') return urlStr;
+        
+        if (urlStr.substr(0, PROXY_PREFIX.length) === PROXY_PREFIX) {
+            return urlStr;
+        }
+
+        try {
+            const currentRemoteHref = getCurrentRemoteHref();
+            const url = new URL(urlStr, currentRemoteHref);
+
+            if (url.origin === window.location.origin && 
+                url.pathname.substr(0, PROXY_PREFIX.length) === PROXY_PREFIX) {
+                return urlStr;
+            }
+
+            if (url.protocol !== "http:" && url.protocol !== "https:" && 
+                url.protocol !== "ws:" && url.protocol !== "wss:") {
+                return urlStr;
+            }
+
+            if (url.hostname === window.location.hostname) {
+                const currentRemoteUrl = new URL(currentRemoteHref);
+                url.host = currentRemoteUrl.host;
+                url.protocol = currentRemoteUrl.protocol;
+            }
+
+            const encoded = xorEncode(url.href);
+            return PROXY_PREFIX + encoded;
+        } catch (e) {
+            return urlStr;
+        }
+    }
+
+    function unfixUrl(urlStr) {
+        if (!urlStr || typeof urlStr !== 'string') return urlStr;
+        if (urlStr.includes(PROXY_PREFIX)) {
             try {
-                const parts = url.split(PROXY_PREFIX);
+                const parts = urlStr.split(PROXY_PREFIX);
                 const encoded = parts[parts.length - 1];
-                try {
-                    const decoded = xorDecode(encoded);
-                    if (decoded && decoded.startsWith('http')) {
-                        return decoded;
-                    }
-                } catch(e) {}
-                try {
-                    return decodeURIComponent(encoded);
-                } catch(e) {}
+                const decoded = safeXorDecode(encoded);
+                if (decoded && decoded !== encoded) {
+                    return decoded;
+                }
             } catch (e) {}
         }
-        return url;
+        return urlStr;
     }
 
-    function getCurrentDomain() {
-        try {
-            const url = unproxyUrl(window.location.href);
-            if (url) {
-                return new URL(url).hostname;
-            }
-        } catch (e) {}
-        return 'default';
-    }
+    function patchXMLHttpRequest() {
+        if (!window.XMLHttpRequest) return;
+        const _XMLHttpRequest = window.XMLHttpRequest;
 
-    // ----- LIBCURL.JS INTEGRATION -----
-    function createLibCurlSession() {
-        try {
-            // Create a new HTTP session with cookie support
-            const session = new libcurl.HTTPSession({
-                enable_cookies: true,
-                cookie_jar: ''
-            });
-            
-            // Set the base URL for relative URLs
-            const currentUrl = unproxyUrl(window.location.href);
-            if (currentUrl) {
-                const urlObj = new URL(currentUrl);
-                session.base_url = urlObj.origin;
-            }
-            
-            return session;
-        } catch(e) {
-            console.error('[sw-helper] Failed to create libcurl session:', e);
-            return null;
-        }
-    }
-
-    // ----- WEBSOCKET TUNNELING WITH LIBCURL -----
-    function createProxiedWebSocket(url, protocols) {
-        try {
-            const targetUrl = new URL(url, window.location.href);
-            const domain = getCurrentDomain();
-            const encodedTarget = xorEncode(targetUrl.href);
-            
-            // Get cookies for this domain
-            let cookieHeader = '';
-            try {
-                cookieHeader = document.cookie;
-            } catch(e) {}
-            
-            // Use libcurl.CurlWebSocket for proper WebSocket tunneling
-            const ws = new libcurl.CurlWebSocket(targetUrl.href, protocols || [], {
-                verbose: 1,
-                headers: {
-                    'Cookie': cookieHeader || '',
-                    'User-Agent': navigator.userAgent,
-                    'X-Proxied-Domain': domain,
-                    'X-Original-URL': targetUrl.href,
-                    'Origin': targetUrl.origin
-                }
-            });
-            
-            // Create a proxy that mimics the native WebSocket API
-            const handlers = {
-                _ws: ws,
-                _listeners: new Map(),
-                _readyState: 0
+        window.XMLHttpRequest = function(opts) {
+            const xhr = new _XMLHttpRequest(opts);
+            const _open = xhr.open;
+            xhr.open = function() {
+                const args = Array.prototype.slice.call(arguments);
+                args[1] = fixUrl(args[1]);
+                return _open.apply(xhr, args);
             };
-            
-            // Map libcurl events to native events
-            ws.onopen = function(event) {
-                handlers._readyState = 1;
-                handlers._listeners.forEach((listeners, type) => {
-                    if (type === 'open') {
-                        listeners.forEach(listener => {
-                            try {
-                                listener(event);
-                            } catch(e) {}
-                        });
-                    }
-                });
-                console.log('[sw-helper] WebSocket connected to:', targetUrl.href);
-            };
-            
-            ws.onmessage = function(data) {
-                handlers._listeners.forEach((listeners, type) => {
-                    if (type === 'message') {
-                        listeners.forEach(listener => {
-                            try {
-                                listener({ data: data, origin: targetUrl.origin });
-                            } catch(e) {}
-                        });
-                    }
-                });
-            };
-            
-            ws.onerror = function(error) {
-                handlers._listeners.forEach((listeners, type) => {
-                    if (type === 'error') {
-                        listeners.forEach(listener => {
-                            try {
-                                listener(error);
-                            } catch(e) {}
-                        });
-                    }
-                });
-                console.error('[sw-helper] WebSocket error:', error);
-            };
-            
-            ws.onclose = function(event) {
-                handlers._readyState = 3;
-                handlers._listeners.forEach((listeners, type) => {
-                    if (type === 'close') {
-                        listeners.forEach(listener => {
-                            try {
-                                listener({ code: 1000, reason: '', wasClean: true });
-                            } catch(e) {}
-                        });
-                    }
-                });
-                console.log('[sw-helper] WebSocket closed');
-            };
-            
-            // Return a proxy that handles the native WebSocket API
-            return new Proxy(ws, {
-                get(target, prop) {
-                    if (prop === 'send') {
-                        return function(data) {
-                            if (ws && typeof ws.send === 'function') {
-                                try {
-                                    ws.send(data);
-                                } catch(e) {
-                                    console.error('[sw-helper] WebSocket send error:', e);
-                                }
-                            }
-                        };
-                    }
-                    if (prop === 'close') {
-                        return function(code, reason) {
-                            if (ws && typeof ws.close === 'function') {
-                                try {
-                                    ws.close(code, reason);
-                                } catch(e) {}
-                            }
-                        };
-                    }
-                    if (prop === 'addEventListener') {
-                        return function(type, listener, options) {
-                            if (!handlers._listeners.has(type)) {
-                                handlers._listeners.set(type, new Set());
-                            }
-                            handlers._listeners.get(type).add(listener);
-                        };
-                    }
-                    if (prop === 'removeEventListener') {
-                        return function(type, listener, options) {
-                            if (handlers._listeners.has(type)) {
-                                handlers._listeners.get(type).delete(listener);
-                            }
-                        };
-                    }
-                    if (prop === 'readyState') {
-                        return handlers._readyState;
-                    }
-                    if (prop === 'url') {
-                        return targetUrl.href;
-                    }
-                    if (prop === 'protocol') {
-                        return protocols && protocols.length > 0 ? protocols[0] : '';
-                    }
-                    if (prop === 'onopen' || prop === 'onmessage' || prop === 'onerror' || prop === 'onclose') {
-                        return function(listener) {
-                            if (prop === 'onopen') {
-                                ws.onopen = listener;
-                            } else if (prop === 'onmessage') {
-                                ws.onmessage = listener;
-                            } else if (prop === 'onerror') {
-                                ws.onerror = listener;
-                            } else if (prop === 'onclose') {
-                                ws.onclose = listener;
-                            }
-                        };
-                    }
-                    return target[prop];
-                }
-            });
-        } catch(e) {
-            console.error('[sw-helper] WebSocket tunneling error:', e);
-            // Fallback to native WebSocket
-            if (window.__native_websocket) {
-                return new window.__native_websocket(url, protocols);
-            }
-            return null;
-        }
-    }
-
-    // ----- INTERCEPT WEBSOCKET -----
-    function interceptWebSocket() {
-        window.__native_websocket = window.WebSocket;
-        
-        window.WebSocket = function(url, protocols) {
-            try {
-                if (url && typeof url === 'string' && !url.includes('/rewriter.js')) {
-                    if (!url.startsWith(PROXY_PREFIX) && !url.startsWith(PROXY_ORIGIN + PROXY_PREFIX)) {
-                        return createProxiedWebSocket(url, protocols);
-                    }
-                }
-            } catch(e) {
-                console.error('[sw-helper] WebSocket interception error:', e);
-            }
-            return new window.__native_websocket(url, protocols);
+            return xhr;
         };
+        window.XMLHttpRequest.prototype = _XMLHttpRequest.prototype;
+    }
+
+    function patchFetch() {
+        if (!window.fetch) return;
+        const _fetch = window.fetch;
+
+        window.fetch = function(resource, init) {
+            if (resource && typeof resource === 'object' && resource.url) {
+                resource.url = fixUrl(resource.url);
+            } else if (typeof resource === 'string' || resource instanceof URL) {
+                resource = fixUrl(resource.toString());
+            }
+            return _fetch(resource, init);
+        };
+        window.fetch.prototype = _fetch.prototype;
+    }
+
+    function patchCreateElement() {
+        if (!window.document || !window.document.createElement) return;
+        const _createElement = window.document.createElement;
+
+        window.document.createElement = function(tagName, options) {
+            const element = _createElement.call(window.document, tagName, options);
+            const tag = tagName.toLowerCase();
+            
+            if (['img', 'script', 'iframe', 'audio', 'video', 'embed', 'source', 'track'].includes(tag)) {
+                const srcDescriptor = Object.getOwnPropertyDescriptor(element, 'src');
+                if (srcDescriptor) {
+                    Object.defineProperty(element, 'src', {
+                        get: srcDescriptor.get,
+                        set: function(value) {
+                            srcDescriptor.set.call(this, fixUrl(value));
+                        },
+                        configurable: true
+                    });
+                }
+            }
+            
+            if (['a', 'link', 'area', 'base'].includes(tag)) {
+                const hrefDescriptor = Object.getOwnPropertyDescriptor(element, 'href');
+                if (hrefDescriptor) {
+                    Object.defineProperty(element, 'href', {
+                        get: hrefDescriptor.get,
+                        set: function(value) {
+                            hrefDescriptor.set.call(this, fixUrl(value));
+                        },
+                        configurable: true
+                    });
+                }
+            }
+            
+            if (tag === 'form') {
+                const actionDescriptor = Object.getOwnPropertyDescriptor(element, 'action');
+                if (actionDescriptor) {
+                    Object.defineProperty(element, 'action', {
+                        get: actionDescriptor.get,
+                        set: function(value) {
+                            actionDescriptor.set.call(this, fixUrl(value));
+                        },
+                        configurable: true
+                    });
+                }
+            }
+            
+            return element;
+        };
+    }
+
+    function patchWebSockets() {
+        if (!window.WebSocket) return;
+        const _WebSocket = window.WebSocket;
+
+        window.WebSocket = function(url, protocols) {
+            let fixedUrl = url;
+            if (typeof url === 'string' && !url.includes(PROXY_PREFIX)) {
+                fixedUrl = fixUrl(url);
+            }
+            return new _WebSocket(fixedUrl, protocols);
+        };
+        window.WebSocket.prototype = _WebSocket.prototype;
         
-        window.WebSocket.prototype = window.__native_websocket.prototype;
-        window.WebSocket.prototype.constructor = window.WebSocket;
-        
-        for (const key in window.__native_websocket) {
+        for (const key in _WebSocket) {
             if (!window.WebSocket[key]) {
-                window.WebSocket[key] = window.__native_websocket[key];
+                window.WebSocket[key] = _WebSocket[key];
             }
         }
-        
         window.WebSocket.CONNECTING = 0;
         window.WebSocket.OPEN = 1;
         window.WebSocket.CLOSING = 2;
         window.WebSocket.CLOSED = 3;
     }
 
-    // ----- INTERCEPT FETCH WITH LIBCURL -----
-    function interceptFetch() {
-        const nativeFetch = window.fetch;
-        window.fetch = function(input, init) {
-            try {
-                let url = typeof input === 'string' ? input : input.url;
-                
-                if (typeof input === 'string' && !input.includes('/rewriter.js')) {
-                    if (!input.startsWith(PROXY_PREFIX) && !input.startsWith(PROXY_ORIGIN + PROXY_PREFIX)) {
-                        input = rewriteUrl(input);
-                    }
-                } else if (input instanceof Request) {
-                    const requestUrl = input.url;
-                    if (!requestUrl.startsWith(PROXY_PREFIX) && !requestUrl.startsWith(PROXY_ORIGIN + PROXY_PREFIX)) {
-                        const newUrl = rewriteUrl(requestUrl);
-                        if (newUrl !== requestUrl) {
-                            input = new Request(newUrl, input);
-                        }
-                    }
-                }
-                
-                // Add cookies to request
-                if (init) {
-                    init.headers = new Headers(init.headers || {});
-                    try {
-                        const cookies = document.cookie;
-                        if (cookies) {
-                            init.headers.set('Cookie', cookies);
-                        }
-                    } catch(e) {}
-                }
-                
-                return nativeFetch.call(this, input, init);
-            } catch(e) {
-                return nativeFetch.call(this, input, init);
+    function patchHistory() {
+        if (!window.history || !window.history.pushState) return;
+
+        const _pushState = window.history.pushState;
+        window.history.pushState = function(state, title, url) {
+            if (url) {
+                url = fixUrl(url);
             }
-        };
-        window.fetch.prototype = nativeFetch.prototype;
-    }
-
-    // ----- INTERCEPT XMLHttpRequest -----
-    function interceptXHR() {
-        const nativeXHROpen = XMLHttpRequest.prototype.open;
-        const nativeXHRSend = XMLHttpRequest.prototype.send;
-        const xhrMap = new WeakMap();
-
-        XMLHttpRequest.prototype.open = function(method, url, async, user, password) {
-            try {
-                let originalUrl = url;
-                if (url && typeof url === 'string' && !url.includes('/rewriter.js')) {
-                    if (!url.startsWith(PROXY_PREFIX) && !url.startsWith(PROXY_ORIGIN + PROXY_PREFIX)) {
-                        url = rewriteUrl(url);
-                    }
-                    xhrMap.set(this, { method, originalUrl, proxiedUrl: url });
-                }
-            } catch(e) {}
-            return nativeXHROpen.call(this, method, url, async, user, password);
+            return _pushState.call(window.history, state, title, url);
         };
 
-        XMLHttpRequest.prototype.send = function(body) {
-            try {
-                // Add cookies
-                try {
-                    const cookies = document.cookie;
-                    if (cookies) {
-                        this.setRequestHeader('Cookie', cookies);
-                    }
-                } catch(e) {}
-                
-                // Intercept FormData
-                if (body instanceof FormData) {
-                    const entries = Array.from(body.entries());
-                    let needsRewrite = false;
-                    const newEntries = entries.map(([key, value]) => {
-                        if (typeof value === 'string' && (value.includes('http://') || value.includes('https://'))) {
-                            try {
-                                new URL(value);
-                                needsRewrite = true;
-                                return [key, rewriteUrl(value)];
-                            } catch(e) {}
-                        }
-                        return [key, value];
-                    });
-                    
-                    if (needsRewrite) {
-                        const newFormData = new FormData();
-                        newEntries.forEach(([key, value]) => {
-                            newFormData.append(key, value);
-                        });
-                        body = newFormData;
-                    }
-                }
-                
-                this.setRequestHeader('X-Proxied', 'true');
-            } catch(e) {}
-            return nativeXHRSend.call(this, body);
+        if (!window.history.replaceState) return;
+        const _replaceState = window.history.replaceState;
+        window.history.replaceState = function(state, title, url) {
+            if (url) {
+                url = fixUrl(url);
+            }
+            return _replaceState.call(window.history, state, title, url);
         };
     }
 
-    // ----- INTERCEPT DOCUMENT.COOKIE -----
-    function interceptDocumentCookie() {
+    function patchLocation() {
+        const locationMock = new Proxy({}, {
+            get(target, prop) {
+                if (prop === 'reload') return () => window.location.reload();
+                if (prop === 'replace') return (url) => {
+                    window.location.replace(fixUrl(url));
+                };
+                if (prop === 'assign') return (url) => {
+                    window.location.assign(fixUrl(url));
+                };
+                if (prop === 'href') {
+                    return window.location.href;
+                }
+                if (prop === 'toString') {
+                    return () => window.location.href;
+                }
+                return window.location[prop];
+            },
+            set(target, prop, value) {
+                if (prop === 'href' && typeof value === 'string') {
+                    window.location.href = fixUrl(value);
+                    return true;
+                }
+                return false;
+            }
+        });
+
+        Object.defineProperty(window, 'location', { 
+            get: () => locationMock, 
+            set: (val) => { 
+                if (typeof val === 'string') {
+                    window.location.href = fixUrl(val);
+                }
+            },
+            configurable: false
+        });
+        
+        Object.defineProperty(document, 'location', { 
+            get: () => locationMock, 
+            set: (val) => { 
+                if (typeof val === 'string') {
+                    window.location.href = fixUrl(val);
+                }
+            },
+            configurable: false
+        });
+    }
+
+    function patchWindowOpen() {
+        const _open = window.open;
+        window.open = function(url, target, features) {
+            if (url && typeof url === 'string') {
+                url = fixUrl(url);
+            }
+            return _open.call(this, url, target, features);
+        };
+    }
+
+    function patchDocumentCookie() {
         const cookieDescriptor = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');
         if (cookieDescriptor) {
             Object.defineProperty(document, 'cookie', {
                 get: function() {
-                    try {
-                        // Get cookies from the cookie jar via service worker
-                        const domain = getCurrentDomain();
-                        const url = window.location.href;
-                        // Use synchronous method to get cookies
-                        return cookieJarClient.getCookiesSync();
-                    } catch(e) {
-                        return '';
-                    }
+                    return cookieDescriptor.get.call(this) || '';
                 },
                 set: function(value) {
-                    try {
-                        // Set cookies in the cookie jar via service worker
-                        cookieJarClient.setCookies(value);
-                    } catch(e) {}
-                    return value;
+                    cookieDescriptor.set.call(this, value);
                 },
                 configurable: true
             });
         }
     }
 
-    // ----- COOKIE JAR CLIENT INTERFACE -----
-    const cookieJarClient = {
-        getCookiesSync() {
-            try {
-                const domain = getCurrentDomain();
-                const url = window.location.href;
-                // Send synchronous message to service worker
-                if (navigator.serviceWorker && navigator.serviceWorker.controller) {
-                    const channel = new MessageChannel();
-                    let result = '';
-                    channel.port1.onmessage = (event) => {
-                        result = event.data || '';
-                    };
-                    try {
-                        navigator.serviceWorker.controller.postMessage({
-                            type: 'getCookiesSync',
-                            domain: domain,
-                            url: url
-                        }, [channel.port2]);
-                        // Wait for response (synchronous wait)
-                        const start = Date.now();
-                        while (result === '' && Date.now() - start < 100) {
-                            // Busy wait for response
-                        }
-                        return result;
-                    } catch(e) {
-                        return '';
-                    }
-                }
-                return '';
-            } catch(e) {
-                return '';
-            }
-        },
-
-        getCookies() {
-            return new Promise((resolve) => {
-                try {
-                    const domain = getCurrentDomain();
-                    const url = window.location.href;
-                    if (navigator.serviceWorker && navigator.serviceWorker.controller) {
-                        const channel = new MessageChannel();
-                        channel.port1.onmessage = (event) => {
-                            resolve(event.data || '');
-                        };
-                        navigator.serviceWorker.controller.postMessage({
-                            type: 'getCookies',
-                            domain: domain,
-                            url: url
-                        }, [channel.port2]);
-                    } else {
-                        resolve('');
-                    }
-                } catch(e) {
-                    resolve('');
-                }
-            });
-        },
-
-        setCookies(cookieString) {
-            try {
-                const domain = getCurrentDomain();
-                const url = window.location.href;
-                if (navigator.serviceWorker && navigator.serviceWorker.controller) {
-                    navigator.serviceWorker.controller.postMessage({
-                        type: 'setCookies',
-                        domain: domain,
-                        url: url,
-                        cookies: cookieString
-                    });
-                }
-            } catch(e) {}
-        },
-
-        deleteCookie(name) {
-            try {
-                const domain = getCurrentDomain();
-                const url = window.location.href;
-                if (navigator.serviceWorker && navigator.serviceWorker.controller) {
-                    navigator.serviceWorker.controller.postMessage({
-                        type: 'deleteCookie',
-                        domain: domain,
-                        url: url,
-                        name: name
-                    });
-                }
-            } catch(e) {}
-        }
-    };
-
-    // ----- COMPLETE FORM HANDLING -----
     function handleFormSubmission(form, event) {
         try {
             if (!form) return false;
             
-            const action = form.getAttribute('action') || window.location.href;
+            let action = form.getAttribute('action') || window.location.href;
             const method = (form.getAttribute('method') || 'GET').toUpperCase();
             const enctype = form.getAttribute('enctype') || 'application/x-www-form-urlencoded';
             const formData = new FormData(form);
             
+            action = fixUrl(action);
+            form.setAttribute('action', action);
+            
             if (method === 'GET') {
-                const url = new URL(rewriteUrl(action));
+                const url = new URL(action);
                 for (let [key, value] of formData.entries()) {
                     if (typeof value === 'string') {
                         url.searchParams.append(key, value);
@@ -926,8 +622,7 @@ const REWRITER_SCRIPT = `(function() {
                 fetch(url.href, {
                     method: 'GET',
                     headers: {
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                        'User-Agent': navigator.userAgent
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
                     },
                     credentials: 'include'
                 })
@@ -964,8 +659,7 @@ const REWRITER_SCRIPT = `(function() {
                 const options = {
                     method: method,
                     headers: {
-                        'X-Form-Submission': 'true',
-                        'User-Agent': navigator.userAgent
+                        'X-Form-Submission': 'true'
                     },
                     credentials: 'include'
                 };
@@ -999,8 +693,7 @@ const REWRITER_SCRIPT = `(function() {
                     options.body = params.toString();
                 }
                 
-                const targetUrl = rewriteUrl(action);
-                fetch(targetUrl, options)
+                fetch(action, options)
                     .then(response => {
                         if (response.redirected) {
                             window.location.href = response.url;
@@ -1015,22 +708,18 @@ const REWRITER_SCRIPT = `(function() {
                             }
                         });
                     })
-                    .catch(error => {
-                        console.error('[sw-helper] Form submission failed:', error);
-                    });
+                    .catch(() => {});
                 
                 return true;
             }
             
             return false;
         } catch(e) {
-            console.error('[sw-helper] Form handling error:', e);
             return false;
         }
     }
 
-    // ----- INTERCEPT FORM SUBMISSIONS -----
-    function setupFormInterception() {
+    function patchForms() {
         document.addEventListener('submit', function(event) {
             const form = event.target;
             if (form && form.tagName && form.tagName.toLowerCase() === 'form') {
@@ -1040,10 +729,10 @@ const REWRITER_SCRIPT = `(function() {
             }
         }, true);
 
-        const originalSubmit = HTMLFormElement.prototype.submit;
+        const _submit = HTMLFormElement.prototype.submit;
         HTMLFormElement.prototype.submit = function() {
             if (this.dataset && this.dataset.intercepted === 'true') {
-                return originalSubmit.call(this);
+                return _submit.call(this);
             }
             if (this.dataset) {
                 this.dataset.intercepted = 'true';
@@ -1053,168 +742,24 @@ const REWRITER_SCRIPT = `(function() {
                 if (this.dataset) {
                     delete this.dataset.intercepted;
                 }
-                return originalSubmit.call(this);
+                return _submit.call(this);
             }
         };
     }
 
-    // ----- INTERCEPT DOM ELEMENTS -----
-    function interceptDOMElements() {
-        const originalCreateElement = document.createElement;
-        document.createElement = function(tagName, options) {
-            const el = originalCreateElement.call(this, tagName, options);
-            const tag = tagName.toLowerCase();
-            
-            const originalSetAttribute = el.setAttribute;
-            el.setAttribute = function(name, value) {
-                try {
-                    const attr = name.toLowerCase();
-                    if (['href', 'src', 'action', 'formaction'].includes(attr)) {
-                        if (typeof value === 'string' && !value.includes('/rewriter.js')) {
-                            value = rewriteUrl(value);
-                        }
-                    }
-                } catch(e) {}
-                return originalSetAttribute.call(this, name, value);
-            };
-            
-            ['src', 'href', 'action', 'formaction'].forEach(attr => {
-                if (el[attr] !== undefined) {
-                    Object.defineProperty(el, attr, {
-                        get: function() {
-                            const val = this.getAttribute(attr);
-                            return unproxyUrl(val) || val;
-                        },
-                        set: function(val) {
-                            if (typeof val === 'string' && !val.includes('/rewriter.js')) {
-                                val = rewriteUrl(val);
-                            }
-                            this.setAttribute(attr, val);
-                        },
-                        configurable: true
-                    });
-                }
-            });
-            
-            if (tag === 'form') {
-                el.addEventListener('submit', function(event) {
-                    if (this.dataset && this.dataset.intercepted === 'true') {
-                        return;
-                    }
-                    event.preventDefault();
-                    event.stopPropagation();
-                    handleFormSubmission(this, event);
-                }, true);
-            }
-            
-            return el;
-        };
-
-        const nativeSetAttribute = Element.prototype.setAttribute;
+    function patchSetAttribute() {
+        const _setAttribute = Element.prototype.setAttribute;
         Element.prototype.setAttribute = function(name, value) {
-            try {
-                const attr = name.toLowerCase();
-                if (['href', 'src', 'action', 'formaction'].includes(attr)) {
-                    if (typeof value === 'string' && !value.includes('/rewriter.js')) {
-                        value = rewriteUrl(value);
-                    }
+            const attr = name.toLowerCase();
+            if (['href', 'src', 'action', 'formaction', 'data'].includes(attr)) {
+                if (typeof value === 'string' && !value.includes('/rewriter.js')) {
+                    value = fixUrl(value);
                 }
-            } catch(e) {}
-            return nativeSetAttribute.call(this, name, value);
+            }
+            return _setAttribute.call(this, name, value);
         };
     }
 
-    // ----- INTERCEPT LOCATION -----
-    function interceptLocation() {
-        const locationMock = new Proxy({}, {
-            get(target, prop) {
-                if (prop === 'reload') return () => window.location.reload();
-                if (prop === 'replace') return (url) => {
-                    if (url && typeof url === 'string' && !url.includes('/rewriter.js')) {
-                        url = rewriteUrl(url);
-                    }
-                    window.location.replace(url);
-                };
-                if (prop === 'assign') return (url) => {
-                    if (url && typeof url === 'string' && !url.includes('/rewriter.js')) {
-                        url = rewriteUrl(url);
-                    }
-                    window.location.assign(url);
-                };
-                if (prop === 'href') {
-                    return window.location.href;
-                }
-                if (prop === 'toString') {
-                    return () => window.location.href;
-                }
-                return window.location[prop];
-            },
-            set(target, prop, value) {
-                if (prop === 'href' && typeof value === 'string') {
-                    if (!value.includes('/rewriter.js')) {
-                        value = rewriteUrl(value);
-                    }
-                    window.location.href = value;
-                    return true;
-                }
-                return false;
-            }
-        });
-
-        Object.defineProperty(window, 'location', { 
-            get: () => locationMock, 
-            set: (val) => { 
-                if (typeof val === 'string' && !val.includes('/rewriter.js')) {
-                    val = rewriteUrl(val);
-                }
-                window.location.href = val; 
-            },
-            configurable: false
-        });
-        
-        Object.defineProperty(document, 'location', { 
-            get: () => locationMock, 
-            set: (val) => { 
-                if (typeof val === 'string' && !val.includes('/rewriter.js')) {
-                    val = rewriteUrl(val);
-                }
-                window.location.href = val; 
-            },
-            configurable: false
-        });
-    }
-
-    // ----- INTERCEPT HISTORY -----
-    function interceptHistory() {
-        const nativePushState = window.history.pushState;
-        window.history.pushState = function(state, title, url) {
-            if (url && typeof url === 'string' && !url.includes('/rewriter.js')) {
-                url = rewriteUrl(url);
-            }
-            return nativePushState.call(this, state, title, url);
-        };
-
-        const nativeReplaceState = window.history.replaceState;
-        window.history.replaceState = function(state, title, url) {
-            if (url && typeof url === 'string' && !url.includes('/rewriter.js')) {
-                url = rewriteUrl(url);
-            }
-            return nativeReplaceState.call(this, state, title, url);
-        };
-    }
-
-    // ----- INTERCEPT WINDOW.OPEN -----
-    function interceptWindowOpen() {
-        const nativeOpen = window.open;
-        window.open = function(url, target, features) {
-            if (url && typeof url === 'string' && !url.includes('/rewriter.js')) {
-                url = rewriteUrl(url);
-            }
-            return nativeOpen.call(this, url, target, features);
-        };
-    }
-
-    // ----- PREVENT FRAME BREAKOUT -----
     function preventBreakout() {
         Object.defineProperty(window, 'top', { get: () => window, configurable: false });
         Object.defineProperty(window, 'parent', { get: () => window, configurable: false });
@@ -1223,29 +768,20 @@ const REWRITER_SCRIPT = `(function() {
         Object.defineProperty(window, 'frameElement', { get: () => null, configurable: false });
     }
 
-    // ----- INITIALIZE -----
     function initialize() {
-        console.log('[sw-helper] running');
-        console.log('[sw-helper] libcurl.js version:', libcurl.version ? libcurl.version.lib : 'unknown');
-        
-        interceptWebSocket();
-        interceptFetch();
-        interceptXHR();
-        interceptDocumentCookie();
-        setupFormInterception();
-        interceptDOMElements();
-        interceptLocation();
-        interceptHistory();
-        interceptWindowOpen();
+        patchXMLHttpRequest();
+        patchFetch();
+        patchCreateElement();
+        patchWebSockets();
+        patchHistory();
+        patchLocation();
+        patchWindowOpen();
+        patchDocumentCookie();
+        patchForms();
+        patchSetAttribute();
         preventBreakout();
-        
-        console.log('[sw-helper] loaded part 1');
-        console.log('[sw-helper] loaded part 2');
-        console.log('[sw-helper] loaded part 3 ');
-        console.log('[sw-helper] loaded part 4, Done!');
     }
 
-    // Run initialization
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', initialize);
     } else {
@@ -1253,52 +789,12 @@ const REWRITER_SCRIPT = `(function() {
     }
 })();`;
 
-// ==========================================
-// SERVICE WORKER - MESSAGE HANDLING FOR COOKIE JAR
-// ==========================================
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
-// Handle messages from the client for cookie operations
-self.addEventListener('message', (event) => {
-    const data = event.data;
-    
-    if (data.type === 'getCookies' || data.type === 'getCookiesSync') {
-        const { domain, url } = data;
-        const cookies = cookieJar.getCookies(url);
-        event.ports[0].postMessage(cookies);
-        return;
-    }
-    
-    if (data.type === 'setCookies') {
-        const { domain, url, cookies } = data;
-        cookieJar.setCookies(url, cookies);
-        event.ports[0].postMessage({ success: true });
-        return;
-    }
-    
-    if (data.type === 'deleteCookie') {
-        const { domain, url, name } = data;
-        cookieJar.deleteCookie(url, name);
-        event.ports[0].postMessage({ success: true });
-        return;
-    }
-    
-    if (data.type === 'clearDomainCookies') {
-        const { domain, url } = data;
-        cookieJar.clearDomainCookies(url);
-        event.ports[0].postMessage({ success: true });
-        return;
-    }
-});
-
-// ==========================================
-// SERVICE WORKER - FETCH HANDLER
-// ==========================================
 self.addEventListener('fetch', (event) => {
     const requestUrl = new URL(event.request.url);
 
-    // Serve rewriter script
     if (requestUrl.pathname === '/rewriter.js') {
         event.respondWith(new Response(REWRITER_SCRIPT, { 
             headers: { 
@@ -1309,102 +805,11 @@ self.addEventListener('fetch', (event) => {
         return;
     }
 
-    // Handle WebSocket upgrade requests
-    if (requestUrl.pathname === '/ws/') {
-        const targetParam = requestUrl.searchParams.get('target');
-        const domain = requestUrl.searchParams.get('domain');
-        
-        if (!targetParam) {
-            event.respondWith(new Response('No target specified', { status: 400 }));
-            return;
-        }
-
-        let targetUrl;
-        try {
-            const decoded = xorCoder.decode(targetParam);
-            if (decoded && decoded.startsWith('http')) {
-                targetUrl = new URL(decoded);
-            } else {
-                targetUrl = new URL(decodeURIComponent(targetParam));
-            }
-        } catch(e) {
-            targetUrl = new URL(decodeURIComponent(targetParam));
-        }
-
-        const handleWebSocket = async () => {
-            try {
-                while (!libcurlReady) {
-                    await new Promise(resolve => setTimeout(resolve, 50));
-                }
-
-                // Get cookies for this domain
-                const cookies = cookieJar.getCookies(targetUrl.href);
-                
-                // Create libcurl WebSocket using the documented API
-                const ws = new libcurl.CurlWebSocket(targetUrl.href, [], {
-                    verbose: 1,
-                    headers: {
-                        'Cookie': cookies || '',
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36',
-                        'Origin': targetUrl.origin,
-                        'Referer': targetUrl.origin,
-                        'X-Proxied-Domain': domain || targetUrl.hostname
-                    }
-                });
-
-                // Store connection
-                const connectionId = Date.now() + Math.random().toString(36);
-                const connection = {
-                    ws: ws,
-                    targetUrl: targetUrl,
-                    domain: domain || targetUrl.hostname
-                };
-                
-                // Handle WebSocket events
-                ws.onopen = () => {
-                    console.log('[sw-helper] WebSocket connected to:', targetUrl.href);
-                };
-
-                ws.onmessage = (data) => {
-                    console.log('[sw-helper] WebSocket message received:', data.length, 'bytes');
-                    // Forward to client if needed
-                };
-
-                ws.onerror = (error) => {
-                    console.error('[sw-helper] WebSocket error:', error);
-                };
-
-                ws.onclose = (event) => {
-                    console.log('[sw-helper] WebSocket closed');
-                };
-
-                return new Response('WebSocket connected', {
-                    status: 101,
-                    statusText: 'Switching Protocols',
-                    headers: {
-                        'Connection': 'Upgrade',
-                        'Upgrade': 'websocket',
-                        'Sec-WebSocket-Accept': 'dGhlIHNhbXBsZSBub25jZQ==',
-                        'X-WebSocket-Id': connectionId
-                    }
-                });
-            } catch (err) {
-                console.error('[sw-helper] WebSocket error:', err);
-                return new Response('WebSocket connection failed: ' + err.message, { status: 502 });
-            }
-        };
-
-        event.respondWith(handleWebSocket());
-        return;
-    }
-
-    // Skip loop guard
     if (event.request.headers.get('X-Proxy-Loop-Guard')) {
         event.respondWith(fetch(event.request));
         return;
     }
 
-    // Handle proxy requests with XOR decoding
     if (requestUrl.pathname.startsWith(PROXY_PREFIX)) {
         const encodedTarget = requestUrl.pathname.substring(PROXY_PREFIX.length);
         if (!encodedTarget) {
@@ -1418,11 +823,10 @@ self.addEventListener('fetch', (event) => {
                     await new Promise(resolve => setTimeout(resolve, 50));
                 }
 
-                // Decode the target URL using XOR
                 let targetUrl;
                 try {
-                    const decoded = xorCoder.decode(encodedTarget);
-                    if (decoded && decoded.startsWith('http')) {
+                    const decoded = xorCoder.safeDecode(encodedTarget);
+                    if (decoded && (decoded.startsWith('http://') || decoded.startsWith('https://'))) {
                         targetUrl = new URL(decoded);
                     } else {
                         targetUrl = new URL(decodeURIComponent(encodedTarget));
@@ -1431,7 +835,6 @@ self.addEventListener('fetch', (event) => {
                     targetUrl = new URL(decodeURIComponent(encodedTarget));
                 }
                 
-                // Get cookies for this domain from the cookie jar
                 const cookies = cookieJar.getCookies(targetUrl.href);
                 
                 const modifiedHeaders = new Headers(event.request.headers);
@@ -1458,18 +861,15 @@ self.addEventListener('fetch', (event) => {
                     if (event.request.body) fetchOptions.duplex = 'half';
                 }
 
-                // Use libcurl.fetch for the request
                 const response = await libcurl.fetch(targetUrl.href, fetchOptions);
                 const contentType = response.headers.get('content-type') || '';
                 const responseHeaders = new Headers(response.headers);
                 
-                // Handle cookies from response
                 const setCookie = responseHeaders.get('set-cookie');
                 if (setCookie) {
                     cookieJar.setCookies(targetUrl.href, setCookie);
                 }
                 
-                // Remove security headers
                 responseHeaders.delete('content-security-policy');
                 responseHeaders.delete('content-security-policy-report-only');
                 responseHeaders.delete('x-content-security-policy');
@@ -1485,7 +885,6 @@ self.addEventListener('fetch', (event) => {
                 responseHeaders.set('Access-Control-Allow-Headers', '*');
                 responseHeaders.set('Access-Control-Allow-Credentials', 'true');
                 
-                // Handle redirects
                 if (responseHeaders.has('location')) {
                     const loc = responseHeaders.get('location');
                     try {
@@ -1495,11 +894,8 @@ self.addEventListener('fetch', (event) => {
                     } catch (e) {}
                 }
 
-                // Handle HTML content
                 if (contentType.includes('text/html')) {
                     let html = await response.text();
-                    
-                    // Inject rewriter script
                     const rewriterUrl = `${self.location.origin}/rewriter.js`;
                     const injectorScript = `<script src="${rewriterUrl}"></script>`;
                     
@@ -1511,7 +907,6 @@ self.addEventListener('fetch', (event) => {
                         html = injectorScript + html;
                     }
                     
-                    // Rewrite URLs in HTML using XOR encoding
                     html = proxyTextContent(html, targetUrl.origin);
                     return new Response(html, { 
                         status: response.status, 
@@ -1520,7 +915,6 @@ self.addEventListener('fetch', (event) => {
                     });
                 }
                 
-                // Handle JavaScript and CSS
                 if (contentType.includes('application/javascript') || contentType.includes('text/css')) {
                     let text = await response.text();
                     text = proxyTextContent(text, targetUrl.origin);
@@ -1537,7 +931,6 @@ self.addEventListener('fetch', (event) => {
                     headers: responseHeaders 
                 });
             } catch (err) {
-                console.error('[sw-helper] Proxy error:', err);
                 return new Response(generateErrorPage(err.message, 502), { 
                     status: 502, 
                     headers: { 'Content-Type': 'text/html' } 
@@ -1549,19 +942,13 @@ self.addEventListener('fetch', (event) => {
         return;
     }
 
-    // Handle other requests normally
     event.respondWith(fetch(event.request));
 });
-
-// ==========================================
-// HELPER FUNCTIONS
-// ==========================================
 
 function proxyTextContent(text, targetOrigin) {
     if (typeof text !== 'string') return text;
     
     try {
-        // Rewrite absolute URLs with XOR encoding
         const absoluteUrlPattern = /(https?:\/\/[a-zA-Z0-9\-._~:/?#[\]@!$&'()*+,;=]+)/g;
         let processed = text.replace(absoluteUrlPattern, (match) => {
             if (match.includes(PROXY_PREFIX) || match.startsWith(self.location.origin)) return match;
@@ -1570,8 +957,7 @@ function proxyTextContent(text, targetOrigin) {
             return `${self.location.origin}${PROXY_PREFIX}${encoded}`;
         });
 
-        // Rewrite all URL attributes with XOR encoding
-        const attrPattern = /\b(href|src|action|formaction|data-url|data-href|data-src|navigation-url|codebase|archive|data|cite|longdesc|profile|usemap|manifest|ping|poster|background|icon|srcset)=["']([^"']+)["']/gi;
+        const attrPattern = /\b(href|src|action|formaction|data-url|data-href|data-src|navigation-url|codebase|archive|data|cite|longdesc|profile|usemap|manifest|ping|poster|background|icon|srcset|data|download|ping|integrity|referrerpolicy|sandbox|allow|allowfullscreen|allowpaymentrequest|loading|decoding|crossorigin|rel|type|media|sizes|as|fetchpriority|importance|blocking|nonce)=["']([^"']+)["']/gi;
         processed = processed.replace(attrPattern, (match, attr, val) => {
             if (val.startsWith('#') || val.startsWith('javascript:') || val.startsWith('data:') || 
                 val.startsWith('blob:') || val.startsWith('about:') || val.includes(PROXY_PREFIX)) return match;
@@ -1580,10 +966,17 @@ function proxyTextContent(text, targetOrigin) {
                 const resolved = new URL(val, targetOrigin).href;
                 const encoded = xorCoder.encode(resolved);
                 return `${attr}="${self.location.origin}${PROXY_PREFIX}${encoded}"`;
-            } catch (e) { return match; }
+            } catch (e) { 
+                try {
+                    const resolved = new URL(val, targetOrigin + '/').href;
+                    const encoded = xorCoder.encode(resolved);
+                    return `${attr}="${self.location.origin}${PROXY_PREFIX}${encoded}"`;
+                } catch(e2) {
+                    return match;
+                }
+            }
         });
 
-        // Rewrite CSS URLs with XOR encoding
         const cssUrlPattern = /url\(["']?([^"')]+)["']?\)/gi;
         processed = processed.replace(cssUrlPattern, (match, url) => {
             if (url.startsWith('data:') || url.startsWith('blob:') || url.includes(PROXY_PREFIX)) return match;
@@ -1592,7 +985,32 @@ function proxyTextContent(text, targetOrigin) {
                 const resolved = new URL(url, targetOrigin).href;
                 const encoded = xorCoder.encode(resolved);
                 return `url("${self.location.origin}${PROXY_PREFIX}${encoded}")`;
-            } catch (e) { return match; }
+            } catch (e) {
+                try {
+                    const resolved = new URL(url, targetOrigin + '/').href;
+                    const encoded = xorCoder.encode(resolved);
+                    return `url("${self.location.origin}${PROXY_PREFIX}${encoded}")`;
+                } catch(e2) {
+                    return match;
+                }
+            }
+        });
+
+        const srcsetPattern = /srcset=["']([^"']+)["']/gi;
+        processed = processed.replace(srcsetPattern, (match, srcset) => {
+            const parts = srcset.split(',').map(part => {
+                const trimmed = part.trim();
+                const [url, size] = trimmed.split(/\s+/);
+                try {
+                    const resolved = new URL(url, targetOrigin).href;
+                    const encoded = xorCoder.encode(resolved);
+                    const newUrl = `${self.location.origin}${PROXY_PREFIX}${encoded}`;
+                    return size ? `${newUrl} ${size}` : newUrl;
+                } catch(e) {
+                    return trimmed;
+                }
+            });
+            return `srcset="${parts.join(', ')}"`;
         });
 
         return processed;
@@ -1603,13 +1021,13 @@ function proxyTextContent(text, targetOrigin) {
 
 function generateErrorPage(errorMessage, status) {
     return `<!DOCTYPE html>
-    <html lang="en">
+    <html>
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Proxy Error</title>
         <style>
-            body { background: #111; color: #eee; font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
+            body { background: #111; color: #eee; font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; }
             .card { background: #1a1a1a; padding: 40px; border-radius: 12px; border: 1px solid #333; max-width: 500px; width: 100%; text-align: center; }
             h1 { color: #ff4a4a; font-size: 24px; margin-top: 0; }
             p { color: #aaa; font-size: 15px; line-height: 1.6; margin-bottom: 25px; }
